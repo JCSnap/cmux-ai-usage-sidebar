@@ -21,6 +21,32 @@ import UsageModels
     #expect(AntigravityClient.label(forWindow: "hourly") == "hourly")
 }
 
+@Test func everyClientPairIsTriedBecauseTheBinaryHoldsMoreThanOne() {
+    // Nothing in the binary layout says which id belongs to which secret, so
+    // every combination has to be a candidate.
+    let pairs = AntigravityCredentialStore.pairs(
+        ids: ["a.apps.googleusercontent.com", "b.apps.googleusercontent.com"],
+        secrets: ["GOCSPX-one", "GOCSPX-two"])
+    #expect(pairs.count == 4)
+    #expect(pairs.first?.clientID == "a.apps.googleusercontent.com")
+    #expect(Set(pairs.map(\.clientSecret)) == ["GOCSPX-one", "GOCSPX-two"])
+}
+
+@Test func scanKeepsTheFirstOfEachRepeatedMatch() {
+    // grep prints one line per hit, and a binary repeats the same string.
+    #expect(AntigravityCredentialStore.distinctLines("a\nb\na\nc\n") == ["a", "b", "c"])
+    #expect(AntigravityCredentialStore.distinctLines("") == [])
+}
+
+@Test func onlyAClientMismatchIsWorthRetrying() {
+    // A wrong pair must fall through to the next candidate. Anything else
+    // repeats for every pair, so it should surface instead of being retried.
+    #expect(AntigravityClient.isWrongClient(400, "{\"error\":\"invalid_client\"}"))
+    #expect(AntigravityClient.isWrongClient(401, ""))
+    #expect(!AntigravityClient.isWrongClient(400, "{\"error\":\"invalid_grant\"}"))
+    #expect(!AntigravityClient.isWrongClient(503, "backend error"))
+}
+
 @Test func usedPercentClampsAndRounds() {
     #expect(UsageWindow(label: "5h", usedFraction: 0.094).usedPercent == 9)
     #expect(UsageWindow(label: "5h", usedFraction: 1.4).usedPercent == 100)

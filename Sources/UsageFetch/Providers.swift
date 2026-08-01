@@ -117,12 +117,6 @@ struct CodexClient: UsageProviderClient {
 /// Note this is not `~/.gemini/oauth_creds.json`, which belongs to gemini-cli
 /// and goes stale independently.
 struct AntigravityClient: UsageProviderClient {
-    /// Extracted from the shipped `agy` binary. The CLI ships this pair itself,
-    /// so it is a public client credential, not a user secret.
-    static let clientID =
-        "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-    static let clientSecret = "GOCSPX-REDACTED"
-
     func fetch(_ account: AccountConfig) async throws -> ProviderReading {
         let home = (account.home ?? "~").expandedPath
         let url = URL(fileURLWithPath: home)
@@ -135,17 +129,7 @@ struct AntigravityClient: UsageProviderClient {
 
         // The stored access token is short-lived and is usually already expired,
         // so refresh unconditionally rather than checking the expiry field.
-        let refreshed = try await Http.json(Http.form(
-            "https://oauth2.googleapis.com/token",
-            fields: [
-                "client_id": Self.clientID,
-                "client_secret": Self.clientSecret,
-                "refresh_token": refreshToken,
-                "grant_type": "refresh_token",
-            ]))
-        guard let accessToken = refreshed.string("access_token") else {
-            throw FetchError.badPayload("token refresh returned no access_token")
-        }
+        let accessToken = try await Self.refresh(refreshToken)
 
         // This endpoint answers 403 PERMISSION_DENIED unless the User-Agent
         // names the antigravity client. That is client sniffing, not a scope
@@ -178,6 +162,47 @@ struct AntigravityClient: UsageProviderClient {
         }
         guard !windows.isEmpty else { throw FetchError.badPayload("no quota buckets") }
         return ProviderReading(windows: windows)
+    }
+
+    /// Exchanges the stored refresh token for an access token.
+    ///
+    /// The OAuth client comes from the installed CLI rather than from source,
+    /// and the binary holds more than one. Try each candidate: only the client
+    /// that issued the token can refresh it, so the endpoint is the authority on
+    /// which pair is right. Remember the winner so this happens once.
+    static func refresh(_ refreshToken: String) async throws -> String {
+        var lastError: Error = FetchError.noClientCredentials
+        var tried: Set<AntigravityCredentials> = []
+        for source in AntigravityCredentialStore.sources {
+            for credentials in source() where tried.insert(credentials).inserted {
+                do {
+                    let refreshed = try await Http.json(Http.form(
+                        "https://oauth2.googleapis.com/token",
+                        fields: [
+                            "client_id": credentials.clientID,
+                            "client_secret": credentials.clientSecret,
+                            "refresh_token": refreshToken,
+                            "grant_type": "refresh_token",
+                        ]))
+                    guard let accessToken = refreshed.string("access_token") else {
+                        throw FetchError.badPayload("token refresh returned no access_token")
+                    }
+                    AntigravityCredentialStore.remember(credentials)
+                    return accessToken
+                } catch let FetchError.badStatus(code, body) where isWrongClient(code, body) {
+                    // Only a mismatched client is worth retrying. Any other
+                    // failure repeats for every pair, so surface it rather than
+                    // hide it behind three more identical requests.
+                    lastError = FetchError.badStatus(code, body)
+                    continue
+                }
+            }
+        }
+        throw lastError
+    }
+
+    static func isWrongClient(_ code: Int, _ body: String) -> Bool {
+        code == 401 || (code == 400 && body.contains("invalid_client"))
     }
 
     /// Antigravity names its windows in words. Claude and Codex report window

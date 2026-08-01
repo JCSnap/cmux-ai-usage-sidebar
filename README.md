@@ -229,6 +229,13 @@ Two behaviours are easy to misdiagnose:
 - A logged-out Claude profile still has a keychain item. That item holds only
   `mcpOAuth`. Its presence is not proof of a login.
 
+Antigravity needs one more thing: only the OAuth client that issued a refresh
+token can refresh it. That client belongs to the Antigravity CLI, so this project
+reads it out of the installed `agy` binary rather than keeping a copy. The binary
+holds more than one client, so each candidate is tried once and the pair that
+works is cached at `~/.config/ai-usage/antigravity-client.json`. Set
+`ANTIGRAVITY_CLIENT_ID` and `ANTIGRAVITY_CLIENT_SECRET` to override the search.
+
 Antigravity also names its windows in words. `weekly` becomes `7d` at the fetch
 layer, so one column width fits every provider.
 

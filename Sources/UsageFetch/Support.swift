@@ -2,12 +2,16 @@ import Foundation
 
 enum FetchError: LocalizedError {
     case noCredential
+    case noClientCredentials
     case badStatus(Int, String)
     case badPayload(String)
 
     var errorDescription: String? {
         switch self {
         case .noCredential: "no stored credential"
+        case .noClientCredentials:
+            "cannot find the Antigravity OAuth client. Install the antigravity CLI, "
+                + "or set ANTIGRAVITY_CLIENT_ID and ANTIGRAVITY_CLIENT_SECRET."
         case let .badStatus(code, body): "HTTP \(code): \(body.prefix(160))"
         case let .badPayload(what): "unexpected payload: \(what)"
         }
@@ -26,10 +30,13 @@ enum Shell {
     }
 
     /// Runs a command and returns its trimmed output, or nil if it fails.
-    static func run(_ executable: String, _ arguments: [String]) -> String? {
+    static func run(
+        _ executable: String, _ arguments: [String], environment: [String: String]? = nil
+    ) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        if let environment { process.environment = environment }
         let out = Pipe()
         process.standardOutput = out
         process.standardError = FileHandle.nullDevice

@@ -26,6 +26,14 @@ echo "==> Installing to /Applications"
 rm -rf "/Applications/$app_name"
 cp -R "$built" "/Applications/$app_name"
 
+# Launch Services registers every app bundle it finds, including the build
+# products. cmux then lists the same extension once per registration. Drop the
+# build copies so only the installed app remains.
+lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+for stale in "$derived/Build/Products"/*/"$app_name"; do
+    [ -d "$stale" ] && "$lsregister" -u "$stale" 2>/dev/null || true
+done
+
 echo "==> Launching once so macOS registers the extension"
 open "/Applications/$app_name"
 sleep 4
@@ -40,7 +48,9 @@ pluginkit -m -p com.cmuxterm.app.cmux.sidebar || {
 cat <<'NEXT'
 
 Next steps in cmux:
-  1. Click the puzzle button next to the sidebar help button.
-  2. Open Sidebar Extensions and enable "AI Usage".
-  3. Choose the extension sidebar provider from the same menu.
+  1. Settings > Advanced > turn on the "Extensions" experimental toggle.
+     The puzzle button does not appear until this is on.
+  2. Click the puzzle button next to the sidebar help button.
+  3. Open Sidebar Extensions and enable "AI Usage".
+  4. Choose the extension sidebar provider from the same menu.
 NEXT

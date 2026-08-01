@@ -65,9 +65,17 @@ extension therefore never holds a token.
 ./scripts/install-app.sh      # build + register the extension
 ```
 
-Then in cmux: click the puzzle button next to the sidebar help button, open
-**Sidebar Extensions**, enable **AI Usage**, and choose the extension sidebar
-provider from the same menu.
+Then enable the extension in cmux:
+
+1. Open Settings, go to **Advanced**, and turn on the **Extensions**
+   experimental toggle. The puzzle button does not exist until you do this.
+2. Click the puzzle button next to the sidebar help button.
+3. Open **Sidebar Extensions** and enable **AI Usage**.
+4. Choose the extension sidebar provider from the same menu.
+
+Enable one entry only. If the list shows the same extension more than once,
+Launch Services holds a stale build copy. Run `install-app.sh` again to remove
+it.
 
 ## Configure
 

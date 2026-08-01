@@ -58,10 +58,48 @@ import UsageModels
     #expect(decoded.accounts[1].state == .signedOut)
 }
 
-@Test func bundledConfigCoversEveryConfiguredAccount() {
-    let config = Config.bundled
-    #expect(config.accounts.count == 6)
-    #expect(config.accounts.filter { $0.provider == .claude }.allSatisfy { $0.keychainService != nil })
-    #expect(config.accounts.filter { $0.provider == .codex }.allSatisfy { $0.codexHome != nil })
-    #expect(config.accounts.filter { $0.provider == .antigravity }.allSatisfy { $0.home != nil })
+@Test func keychainDumpYieldsEveryClaudeProfile() {
+    // A trimmed `security dump-keychain` listing. Each item prints one
+    // attribute per line, and unrelated items share the same shape.
+    let dump = """
+        attributes:
+            "svce"<blob>="Claude Code-credentials-1a2b3c"
+            "acct"<blob>="jane"
+        attributes:
+            "svce"<blob>="Claude Code-credentials"
+        attributes:
+            "svce"<blob>="Chrome Safe Storage"
+        """
+    // The default profile has no suffix, and it sorts first so it becomes
+    // "claude" rather than "claude-2".
+    #expect(Discovery.claudeServices(inKeychainDump: dump)
+        == ["Claude Code-credentials", "Claude Code-credentials-1a2b3c"])
+}
+
+@Test func discoveredAccountsAreNamedInAStableOrder() {
+    let accounts = Discovery.claudeAccounts(
+        services: ["Claude Code-credentials", "Claude Code-credentials-1a2b3c"])
+    #expect(accounts.map(\.id) == ["claude", "claude-2"])
+    #expect(accounts.allSatisfy { $0.keychainService != nil })
+}
+
+@Test func discoveredPathsAreWrittenBackInTildeForm() {
+    // The config file is meant to be read and edited, so an absolute home path
+    // would be noise.
+    let codex = Discovery.codexAccounts(
+        directories: ["/Users/jane/.codex", "/Users/jane/.codex-work"], home: "/Users/jane")
+    #expect(codex.map(\.codexHome) == ["~/.codex", "~/.codex-work"])
+
+    let antigravity = Discovery.antigravityAccounts(
+        homes: ["/Users/jane", "/Users/jane/.agy-home-2"], home: "/Users/jane")
+    #expect(antigravity.map(\.home) == ["~", "~/.agy-home-2"])
+    #expect(antigravity.map(\.id) == ["antigravity", "antigravity-2"])
+}
+
+@Test func discoveryFindsNothingWhenNoAgentIsInstalled() {
+    // An empty result must stay empty rather than fall back to an invented
+    // account, because a phantom account reads as a broken login in the sidebar.
+    #expect(Discovery.claudeServices(inKeychainDump: "") == [])
+    #expect(Discovery.accounts(home: "/nonexistent-home").isEmpty
+        || !Discovery.accounts(home: "/nonexistent-home").contains { $0.provider != .claude })
 }

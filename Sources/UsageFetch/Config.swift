@@ -43,31 +43,33 @@ public struct Config: Codable, Sendable {
 
     public static let path = NSString(string: "~/.config/ai-usage/config.json").expandingTildeInPath
 
-    /// Matches the cc1/cc2, c1/c2, agy1/agy2 layout set up in `~/.zshrc`.
-    /// The Claude suffix is derived by Claude Code from `CLAUDE_CONFIG_DIR`.
-    public static let bundled = Config(accounts: [
-        .init(id: "cc1", provider: .claude, displayName: "cc1",
-              keychainService: "Claude Code-credentials"),
-        .init(id: "cc2", provider: .claude, displayName: "cc2",
-              keychainService: "Claude Code-credentials-950212fc"),
-        .init(id: "c1", provider: .codex, displayName: "c1", codexHome: "~/.codex"),
-        .init(id: "c2", provider: .codex, displayName: "c2", codexHome: "~/.codex-2"),
-        .init(id: "agy1", provider: .antigravity, displayName: "agy1", home: "~"),
-        .init(id: "agy2", provider: .antigravity, displayName: "agy2", home: "~/.agy-home-2"),
-    ])
+    /// The accounts that exist on this machine.
+    ///
+    /// A shipped account list only ever fits the machine it was written on,
+    /// because every agent CLI names its second account store by hand. Read the
+    /// machine instead. `Discovery` explains what it looks at.
+    public static func discovered() -> Config { Config(accounts: Discovery.accounts()) }
 
-    /// Reads the config file. Writes the bundled default first if none exists.
+    /// Reads the config file. Writes a discovered one first if none exists.
+    ///
+    /// The file wins once it exists, so a name or an account the user edited in
+    /// is never overwritten by a later scan.
     public static func load() throws -> Config {
         let url = URL(fileURLWithPath: path)
         if !FileManager.default.fileExists(atPath: path) {
+            let config = discovered()
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(bundled).write(to: url)
-            return bundled
+            try config.encoded().write(to: url)
+            return config
         }
         return try JSONDecoder().decode(Config.self, from: Data(contentsOf: url))
+    }
+
+    public func encoded() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(self)
     }
 }
 

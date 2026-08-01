@@ -73,8 +73,25 @@ final class UsageServer: @unchecked Sendable {
 // MARK: - Entry point
 
 let arguments = Set(CommandLine.arguments.dropFirst())
+
+if arguments.contains("--discover") {
+    // Prints the accounts found on this machine, without reading or writing the
+    // config file. Setup tooling uses this to propose a config the user can
+    // rename before it is saved.
+    FileHandle.standardOutput.write(try Config.discovered().encoded())
+    FileHandle.standardOutput.write(Data("\n".utf8))
+    exit(0)
+}
+
 let config = try Config.load()
 let collector = UsageCollector()
+
+if config.accounts.isEmpty {
+    FileHandle.standardError.write(Data("""
+    aiusaged: no accounts configured. Run `aiusaged --discover` to see what this \
+    machine has, then write \(Config.path).\n
+    """.utf8))
+}
 
 if arguments.contains("--once") {
     // One-shot mode: print the snapshot and exit. Useful for testing the

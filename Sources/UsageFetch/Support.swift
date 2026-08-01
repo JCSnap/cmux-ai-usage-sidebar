@@ -22,9 +22,14 @@ enum Shell {
     /// A direct `SecItemCopyMatching` from this daemon is a different caller and
     /// makes macOS show an approval panel, which a background agent cannot answer.
     static func keychainPassword(service: String) -> String? {
+        run("/usr/bin/security", ["find-generic-password", "-s", service, "-w"])
+    }
+
+    /// Runs a command and returns its trimmed output, or nil if it fails.
+    static func run(_ executable: String, _ arguments: [String]) -> String? {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", service, "-w"]
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
         let out = Pipe()
         process.standardOutput = out
         process.standardError = FileHandle.nullDevice

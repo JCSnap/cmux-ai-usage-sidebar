@@ -1,4 +1,4 @@
-# AI Usage Sidebar
+# cmux AI Usage Sidebar
 
 A [cmux](https://github.com/manaflow-ai/cmux) sidebar that shows how much of its
 rate limit each local AI agent account has spent. It reads Claude Code, Codex,
@@ -67,7 +67,28 @@ that each agent vendor already receives from its own CLI.
 - Xcode 16 or newer.
 - An Apple Development signing identity. A free personal team is sufficient.
 
-## Install
+## Install with an AI agent
+
+Two parts of the install depend on your machine: your Apple signing team, and
+which agent accounts you have. This repository ships a skill that finds both,
+and then does the rest.
+
+Copy the skill to your agent's skill directory, then ask for the setup:
+
+```bash
+cp -R skills/cmux-ai-usage-setup ~/.claude/skills/
+```
+
+Then say: *"set up the cmux AI usage sidebar"*.
+
+The agent reads your certificate for the team ID, finds your accounts, asks what
+you call each one, and writes the config. It cannot click the cmux settings
+window, so it gives you those four steps at the end.
+
+The skill is plain Markdown at `skills/cmux-ai-usage-setup/SKILL.md`. Any agent
+that reads a file can follow it. To install by hand instead, use the steps below.
+
+## Install by hand
 
 Do these steps one time.
 
@@ -124,14 +145,30 @@ Enable one entry only. If the list shows AI Usage more than one time, Launch
 Services holds a stale build copy. Run `./scripts/install-app.sh` again. The
 script removes the stale copies.
 
-### 6. Set your accounts
+### 6. Check your accounts
 
-Edit `~/.config/ai-usage/config.json`. The default file lists the author's
-accounts, so replace those entries with your own. Then restart the daemon:
+The daemon finds your accounts itself. At the first start it writes what it found
+to `~/.config/ai-usage/config.json`. To see the same list without a write, run:
+
+```bash
+~/.local/bin/aiusaged --discover
+```
+
+Discovery reads the login keychain for `Claude Code-credentials*` items. It looks
+for `auth.json` under each `~/.codex*` directory. It looks for an Antigravity
+token under your home directory and its dot-directories. It names the first
+account of each kind plainly and numbers the rest: `claude`, `claude-2`, `codex`,
+`codex-2`.
+
+Edit the file for two reasons. Rename an account to what you call it, because
+`claude-2` says nothing. Add an account that is signed out, because a store with
+no credential in it is invisible to discovery. Then restart the daemon:
 
 ```bash
 launchctl kickstart -k "gui/$UID/dev.jcsnap.aiusaged"
 ```
+
+The file wins once it exists. A later scan never overwrites your names.
 
 The file lists one entry per account:
 
@@ -167,6 +204,12 @@ security dump-keychain | grep -o '"Claude Code[^"]*"' | sort -u
 ```
 
 ## Verify
+
+List the accounts this machine has:
+
+```bash
+~/.local/bin/aiusaged --discover
+```
 
 Print one snapshot without the daemon:
 
@@ -230,8 +273,10 @@ The extension target keeps a generated copy of the wire types, because it is a
 separate Xcode target and cannot link the SwiftPM library. `sync-models.sh`
 copies them. Do not edit the generated file.
 
-Add a provider in three steps. Add a case to `UsageProvider`. Add a client that
+Add a provider in four steps. Add a case to `UsageProvider`. Add a client that
 conforms to `UsageProviderClient`. Add the credential field to `AccountConfig`.
+Add a scan for that credential to `Discovery`, so the new provider needs no
+hand-written config either.
 
 ## Layout
 
@@ -240,5 +285,6 @@ Sources/UsageModels     wire types, shared by both sides
 Sources/UsageFetch      credential access and provider HTTP
 Sources/aiusaged        refresh loop and loopback server
 AIUsageSidebar/         Xcode project: containing app + sidebar extension
+skills/                 setup skill for an AI agent
 vendor/CmuxExtensionKit copy of the cmux extension SDK
 ```

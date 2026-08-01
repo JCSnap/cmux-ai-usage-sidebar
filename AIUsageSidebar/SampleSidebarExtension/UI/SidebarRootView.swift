@@ -11,14 +11,30 @@ struct SidebarRootView: View {
 
     /// Chosen workspace height in points, or 0 to fit the rows automatically.
     /// Stored so the split survives a sidebar reload.
+    ///
+    /// Only written when a drag ends. `@AppStorage` is a `UserDefaults` adapter,
+    /// not a state variable: each write also posts a change notification that
+    /// SwiftUI observes a runloop turn later, so writing it per pointer event
+    /// laid the view out twice per event, a frame apart. The late pass could
+    /// land after the next event and briefly redraw the divider at the previous
+    /// height, which is what made the panel judder during a drag.
     @AppStorage("workspaceListHeight") private var chosenHeight: Double = 0
 
-    /// Height when the current drag began. Held so each drag applies to where
-    /// the divider started, not to the value the previous frame just wrote.
-    @State private var dragBaseline: Double?
+    /// The drag in progress, if any. Its height supersedes the stored one, so
+    /// the divider tracks the pointer without touching `UserDefaults`.
+    @State private var drag: Drag?
 
     private static let minimumWorkspaceHeight: Double = 40
     private static let minimumUsageHeight: Double = 90
+
+    /// A drag needs both the height it started from and the height it is at.
+    ///
+    /// The baseline is fixed for the whole gesture because `DragGesture` reports
+    /// translation cumulatively; applying it to a moving value would compound.
+    private struct Drag {
+        var baseline: Double
+        var height: Double
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -28,13 +44,18 @@ struct SidebarRootView: View {
                     .frame(height: height(in: available))
                 SplitHandle(
                     onDrag: { translation in
-                        let baseline = dragBaseline ?? height(in: available)
-                        dragBaseline = baseline
-                        chosenHeight = clamp(baseline + Double(translation), in: available)
+                        let baseline = drag?.baseline ?? height(in: available)
+                        drag = Drag(
+                            baseline: baseline,
+                            height: clamp(baseline + Double(translation), in: available)
+                        )
                     },
-                    onDragEnded: { dragBaseline = nil },
+                    onDragEnded: {
+                        if let drag { chosenHeight = drag.height }
+                        drag = nil
+                    },
                     onReset: {
-                        dragBaseline = nil
+                        drag = nil
                         chosenHeight = 0
                     }
                 )
@@ -50,6 +71,7 @@ struct SidebarRootView: View {
     /// Automatic sizing stays the default so the sidebar is useful before any
     /// drag, and a double click returns to it.
     private func height(in available: Double) -> Double {
+        if let drag { return drag.height }
         guard chosenHeight > 0 else {
             return min(Double(workspaces.estimatedListHeight), available * 0.5)
         }

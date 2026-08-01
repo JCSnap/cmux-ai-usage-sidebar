@@ -5,7 +5,11 @@ two Claude Code accounts, two Codex accounts, and two Antigravity accounts.
 
 cmux shows one sidebar at a time, so an extension sidebar replaces the built-in
 one. This sidebar therefore also lists the cmux workspaces and switches between
-them. The usage section collapses when you need the full height for workspaces.
+them.
+
+Drag the divider to change how the height is shared. Double-click it to fit the
+workspace list to its rows again. The usage section also collapses from its
+header, and the clock button shows when each window resets.
 
 ```
 AI USAGE                              2 min ago  ⟳

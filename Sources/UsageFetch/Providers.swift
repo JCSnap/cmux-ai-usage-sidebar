@@ -171,13 +171,26 @@ struct AntigravityClient: UsageProviderClient {
             return buckets.map { bucket in
                 UsageWindow(
                     group: name,
-                    label: bucket.string("window") ?? "—",
+                    label: Self.label(forWindow: bucket.string("window")),
                     usedFraction: 1 - (bucket.double("remainingFraction") ?? 1),
                     resetsAt: bucket.string("resetTime").flatMap(Date.fromISO8601))
             }
         }
         guard !windows.isEmpty else { throw FetchError.badPayload("no quota buckets") }
         return ProviderReading(windows: windows)
+    }
+
+    /// Antigravity names its windows in words. Claude and Codex report window
+    /// lengths, which become labels like "5h" and "7d". This maps the words to
+    /// the same short form so one column width fits every provider.
+    static func label(forWindow raw: String?) -> String {
+        switch raw?.lowercased() {
+        case "weekly", "week": "7d"
+        case "daily", "day": "24h"
+        case "monthly", "month": "30d"
+        case let known?: known
+        case nil: "—"
+        }
     }
 }
 

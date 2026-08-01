@@ -10,6 +10,17 @@ import UsageModels
     #expect(CodexClient.label(forWindowSeconds: 0) == "—")
 }
 
+@Test func antigravityWindowWordsBecomeShortLabels() {
+    // Antigravity says "weekly" where the others report a length. One column
+    // width has to fit every provider, so the words normalise to the same form.
+    #expect(AntigravityClient.label(forWindow: "weekly") == "7d")
+    #expect(AntigravityClient.label(forWindow: "5h") == "5h")
+    #expect(AntigravityClient.label(forWindow: nil) == "—")
+    // An unknown word passes through rather than becoming "—": showing the raw
+    // value is more useful than hiding that a new window kind appeared.
+    #expect(AntigravityClient.label(forWindow: "hourly") == "hourly")
+}
+
 @Test func usedPercentClampsAndRounds() {
     #expect(UsageWindow(label: "5h", usedFraction: 0.094).usedPercent == 9)
     #expect(UsageWindow(label: "5h", usedFraction: 1.4).usedPercent == 100)

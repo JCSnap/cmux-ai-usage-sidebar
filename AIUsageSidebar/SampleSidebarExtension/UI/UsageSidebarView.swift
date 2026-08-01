@@ -7,6 +7,7 @@ import SwiftUI
 struct UsagePanel: View {
     @State private var store = UsageStore()
     @State private var isExpanded = true
+    @State private var showsDetail = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -36,6 +37,15 @@ struct UsagePanel: View {
             .buttonStyle(.plain)
             Spacer(minLength: 0)
             freshness
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { showsDetail.toggle() }
+            } label: {
+                Image(systemName: showsDetail ? "clock.fill" : "clock")
+                    .imageScale(.small)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(showsDetail ? Color.accentColor : .secondary)
+            .help(showsDetail ? "Hide reset times" : "Show reset times")
             Button {
                 Task { await store.refresh() }
             } label: {
@@ -86,7 +96,7 @@ struct UsagePanel: View {
                                     .foregroundStyle(.secondary)
                                     .textCase(.uppercase)
                                     .padding(.bottom, 2)
-                                ForEach(accounts) { AccountRow(account: $0) }
+                                ForEach(accounts) { AccountRow(account: $0, showsDetail: showsDetail) }
                             }
                         }
                     }
@@ -94,7 +104,6 @@ struct UsagePanel: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
             }
-            .frame(maxHeight: 340)
         }
     }
 

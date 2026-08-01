@@ -10,11 +10,17 @@ struct SidebarRootView: View {
     let workspaces: WorkspaceStore
 
     var body: some View {
-        VStack(spacing: 0) {
-            WorkspaceList(store: workspaces)
-                .frame(maxHeight: .infinity)
-            Divider()
-            UsagePanel()
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                // The workspace list takes only the height its rows need, so
+                // usage gets the remainder. The cap stops a long workspace list
+                // from pushing usage off screen; past it, the list scrolls.
+                WorkspaceList(store: workspaces)
+                    .frame(height: min(workspaces.estimatedListHeight, geometry.size.height * 0.5))
+                Divider()
+                UsagePanel()
+                    .frame(maxHeight: .infinity, alignment: .top)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }

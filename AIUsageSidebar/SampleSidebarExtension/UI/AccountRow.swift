@@ -4,9 +4,20 @@ import SwiftUI
 struct AccountRow: View {
     let account: UsageAccount
 
+    /// Reveals reset times and the signed-in address. Driven by one toggle in
+    /// the panel header, so every account discloses together.
+    var showsDetail = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             header
+            if showsDetail, let email = account.email {
+                Text(email)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
             switch account.state {
             case .ok:
                 ForEach(groupedWindows, id: \.name) { group in
@@ -16,8 +27,9 @@ struct AccountRow: View {
                                 .font(.system(size: 9, weight: .medium))
                                 .foregroundStyle(.tertiary)
                                 .textCase(.uppercase)
+                                .lineLimit(1)
                         }
-                        ForEach(group.windows) { UsageMeter(window: $0) }
+                        ForEach(group.windows) { UsageMeter(window: $0, showsReset: showsDetail) }
                     }
                 }
             case .signedOut:

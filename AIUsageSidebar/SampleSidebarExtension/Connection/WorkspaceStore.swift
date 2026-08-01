@@ -47,6 +47,21 @@ final class WorkspaceStore {
     }
 }
 
+extension WorkspaceStore {
+    /// Height the workspace list needs to show every row without scrolling.
+    ///
+    /// A `ScrollView` reports no intrinsic height, so it takes every point the
+    /// parent offers and leaves the usage panel squeezed. Measuring the rows
+    /// here lets the list stay as short as its content.
+    var estimatedListHeight: CGFloat {
+        let rowHeight: CGFloat = 35
+        let headingHeight: CGFloat = 24
+        let headings = groups.filter { $0.title != nil }.count
+        let content = CGFloat(workspaces.count) * rowHeight + CGFloat(headings) * headingHeight
+        return max(40, content + 16)
+    }
+}
+
 struct WorkspaceGroup: Identifiable {
     var path: String
     var workspaces: [CmuxSidebarWorkspace]

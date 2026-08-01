@@ -7,7 +7,10 @@ import UsageModels
 /// connection reads it, so no request ever waits on a provider call.
 actor SnapshotStore {
     private var snapshot = UsageSnapshot.empty
-    private var encoded = Data("{}".utf8)
+    // A valid empty snapshot, not a bare "{}". The sidebar decodes every reply,
+    // so a placeholder it cannot decode reads as "daemon unreachable" during
+    // the seconds before the first fetch lands.
+    private var encoded = (try? UsageSnapshot.encoder().encode(UsageSnapshot.empty)) ?? Data()
 
     func update(_ new: UsageSnapshot) {
         snapshot = new

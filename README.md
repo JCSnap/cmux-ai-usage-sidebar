@@ -4,39 +4,24 @@ A [cmux](https://github.com/manaflow-ai/cmux) sidebar that shows how much of its
 rate limit each local AI agent account has spent. It reads Claude Code, Codex,
 and Antigravity accounts, including second accounts of the same agent.
 
+![The sidebar inside cmux, with the workspace list above the usage panel](docs/sidebar.png)
+
 cmux shows one sidebar at a time, so an extension sidebar replaces the built-in
 one. This sidebar therefore also lists the cmux workspaces and switches between
-them.
+them. Workspaces stay on top, because they are the primary navigation. Usage is
+reference data, so it sits below and collapses from its header.
 
 Drag the divider to change how the two halves share the height. Double-click the
-divider to fit the workspace list to its rows again. The usage section collapses
-from its header. The clock button shows when each window resets.
+divider to fit the workspace list to its rows again.
 
-```
-AI USAGE                              2 min ago  ⟳
-────────────────────────────────────────────────
-CLAUDE CODE
-● cc1                                       pro
-  5h   ▓▓░░░░░░░░░░░░░░░░               12%
-  7d   ▓░░░░░░░░░░░░░░░░░                9%
-○ cc2
-  Not signed in
+The clock button discloses more about each account: the signed-in address, and
+when each window resets.
 
-CODEX
-● c1                                  education
-  5h   ▓░░░░░░░░░░░░░░░░░                2%
-  7d   ▓░░░░░░░░░░░░░░░░░                3%
-● c2                                       plus
-  7d   ░░░░░░░░░░░░░░░░░░                0%
+<img src="docs/usage-detail.png" width="240"
+     alt="The usage panel with reset times shown under each bar">
 
-ANTIGRAVITY
-● agy1
-  GEMINI MODELS
-  7d   ▓░░░░░░░░░░░░░░░░░                1%
-  5h   ░░░░░░░░░░░░░░░░░░                0%
-○ agy2
-  Not signed in
-```
+A grey dot and "Not signed in" mark an account that has no valid credential.
+A bar turns orange above 50 percent and red above 80 percent.
 
 ## Architecture
 

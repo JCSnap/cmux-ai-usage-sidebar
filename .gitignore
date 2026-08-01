@@ -1,6 +1,7 @@
 .build/
 .swiftpm/
 DerivedData/
-vendor/cmux/
 *.xcuserstate
 xcuserdata/
+AIUsageSidebar/DerivedData/
+vendor/

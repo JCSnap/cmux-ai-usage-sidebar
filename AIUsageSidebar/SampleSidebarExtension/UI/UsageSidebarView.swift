@@ -1,24 +1,39 @@
 import SwiftUI
 
-/// The whole sidebar: a header, then accounts grouped by provider.
-struct UsageSidebarView: View {
+/// The usage half of the sidebar: a header, then accounts grouped by provider.
+///
+/// The section is collapsible and height-capped so it never crowds out the
+/// workspace list above it.
+struct UsagePanel: View {
     @State private var store = UsageStore()
+    @State private var isExpanded = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Divider()
-            content
+            if isExpanded {
+                Divider()
+                content
+            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .task { store.start() }
         .onDisappear { store.stop() }
     }
 
     private var header: some View {
         HStack(spacing: 6) {
-            Text("AI usage")
-                .font(.system(size: 12, weight: .semibold))
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.right")
+                        .imageScale(.small)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    Text("AI usage")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+            }
+            .buttonStyle(.plain)
             Spacer(minLength: 0)
             freshness
             Button {
@@ -33,6 +48,7 @@ struct UsageSidebarView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
+        .contentShape(Rectangle())
     }
 
     @ViewBuilder
@@ -78,6 +94,7 @@ struct UsageSidebarView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
             }
+            .frame(maxHeight: 340)
         }
     }
 

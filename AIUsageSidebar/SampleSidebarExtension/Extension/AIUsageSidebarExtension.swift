@@ -3,25 +3,29 @@ import SwiftUI
 
 /// ExtensionKit entry point for the cmux sidebar.
 ///
-/// The manifest requests no read or action scopes. This sidebar shows only
-/// agent usage limits, so it never needs cmux workspace data and never asks
-/// for permission it would not use.
+/// An extension sidebar replaces the built-in sidebar rather than adding to it,
+/// so this extension must render the workspace switcher itself. That is why it
+/// requests workspace read scopes and the select action. It requests nothing
+/// beyond what those rows show: no surfaces, notifications, ports, or pull
+/// requests.
 @main
 final class AIUsageSidebarExtension: @MainActor CmuxSidebarExtension {
     static let manifest = CmuxExtensionManifest(
         id: "dev.jcsnap.AIUsageSidebar.Extension",
         displayName: "AI Usage",
-        readScopes: [],
-        actionScopes: []
+        readScopes: [.workspaceList, .workspaceMetadata, .workspacePaths],
+        actionScopes: [.selectWorkspace]
     )
+
+    private let workspaces = WorkspaceStore()
 
     required init() {}
 
     var body: some View {
-        UsageSidebarView()
+        SidebarRootView(workspaces: workspaces)
     }
 
     func update(context: CmuxSidebarContext) {
-        // No cmux state is used, so there is nothing to store per update.
+        workspaces.apply(context)
     }
 }

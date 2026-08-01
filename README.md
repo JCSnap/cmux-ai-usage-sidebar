@@ -3,6 +3,10 @@
 A cmux sidebar that shows the rate-limit usage of every local AI agent account:
 two Claude Code accounts, two Codex accounts, and two Antigravity accounts.
 
+cmux shows one sidebar at a time, so an extension sidebar replaces the built-in
+one. This sidebar therefore also lists the cmux workspaces and switches between
+them. The usage section collapses when you need the full height for workspaces.
+
 ```
 AI USAGE                              2 min ago  ⟳
 ────────────────────────────────────────────────
@@ -144,6 +148,22 @@ swift build && swift test          # daemon
 The extension target keeps a generated copy of the wire types, because it is a
 separate Xcode target and cannot link the SPM library. `sync-models.sh` copies
 them; do not edit the generated file.
+
+## Layout
+
+## Permissions
+
+The extension asks cmux for the least it needs to draw the workspace list:
+
+| scope | use |
+|---|---|
+| `workspaceList` | workspace identity and order |
+| `workspaceMetadata` | title, branch, unread count, current selection |
+| `workspacePaths` | project root headings and row subtitles |
+| `selectWorkspace` | switch workspace when you click a row |
+
+It never requests surfaces, notifications, ports, or pull requests. Usage data
+does not come through cmux at all — it comes from the daemon.
 
 ## Layout
 

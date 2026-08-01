@@ -24,23 +24,48 @@ struct SplitHandle: View {
         }
         .frame(height: 7)
         .gesture(
-            DragGesture(minimumDistance: 1)
+            // Global space, not the default local space. `translation` is
+            // `location - startLocation` measured in the chosen space, and this
+            // handle is the view the drag moves. In local space its origin
+            // travels with it, so the translation reported back is the pointer
+            // movement minus the movement already applied. Acting on it moves
+            // the handle to the pointer, which drives the next translation to
+            // zero, which moves the handle back: the divider oscillates above
+            // and below the cursor for as long as the drag continues. A space
+            // that does not move with the handle breaks the loop.
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
                 .onChanged { value in
-                    isActive = true
+                    // Assigning `@State` invalidates the view whether or not the
+                    // value changed, so only announce the transition once. This
+                    // fires per pointer event, and a spare layout pass on each
+                    // one is visible as jitter in the panel below.
+                    if !isActive { isActive = true }
+                    // The pointer outruns a 7pt strip, so keep re-asserting the
+                    // cursor for as long as the gesture owns it.
+                    NSCursor.resizeUpDown.set()
                     onDrag(value.translation.height)
                 }
                 .onEnded { _ in
                     isActive = false
+                    NSCursor.arrow.set()
                     onDragEnded()
                 }
         )
         .onTapGesture(count: 2, perform: onReset)
-        .onHover { inside in
-            // The pointer must say "this is draggable" before the user tries.
-            if inside {
-                NSCursor.resizeUpDown.push()
-            } else {
-                NSCursor.pop()
+        // The pointer must say "this is draggable" before the user tries.
+        //
+        // `set()` rather than `push()`/`pop()`: the stack leaks an entry if the
+        // view goes away while hovered, which strands every other view with a
+        // resize cursor. `onContinuousHover` re-sets on each move, so AppKit's
+        // own cursor rects cannot win it back mid-hover.
+        .onContinuousHover { phase in
+            switch phase {
+            case .active:
+                NSCursor.resizeUpDown.set()
+            case .ended:
+                // A drag routinely leaves the strip. Restoring the arrow here
+                // would strobe the cursor for the rest of the gesture.
+                if !isActive { NSCursor.arrow.set() }
             }
         }
         .help("Drag to resize · double-click to fit the workspace list")

@@ -6,3 +6,6 @@ xcuserdata/
 AIUsageSidebar/DerivedData/
 vendor/
 .DS_Store
+
+# Worktrees and local agent state.
+.claude/

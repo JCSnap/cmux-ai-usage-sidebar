@@ -24,7 +24,16 @@ struct SplitHandle: View {
         }
         .frame(height: 7)
         .gesture(
-            DragGesture(minimumDistance: 1)
+            // Global space, not the default local space. `translation` is
+            // `location - startLocation` measured in the chosen space, and this
+            // handle is the view the drag moves. In local space its origin
+            // travels with it, so the translation reported back is the pointer
+            // movement minus the movement already applied. Acting on it moves
+            // the handle to the pointer, which drives the next translation to
+            // zero, which moves the handle back: the divider oscillates above
+            // and below the cursor for as long as the drag continues. A space
+            // that does not move with the handle breaks the loop.
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
                 .onChanged { value in
                     // Assigning `@State` invalidates the view whether or not the
                     // value changed, so only announce the transition once. This

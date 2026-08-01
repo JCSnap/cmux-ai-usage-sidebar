@@ -11,12 +11,19 @@ project="$root/AIUsageSidebar/SampleSidebarExtensionApp.xcodeproj"
 derived="$root/AIUsageSidebar/DerivedData"
 app_name="AI Usage Sidebar.app"
 
+# The project stores the original author's team, which nobody else can sign
+# with. Setting DEVELOPMENT_TEAM overrides it without an edit to the project
+# file, so a fork stays a clean checkout.
+team_override=()
+[ -n "${DEVELOPMENT_TEAM:-}" ] && team_override=("DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM")
+
 echo "==> Building release app"
 xcodebuild -project "$project" \
     -scheme CMUXExtKitSampleSidebarApp \
     -configuration Release \
     -destination 'platform=macOS' \
     -derivedDataPath "$derived" \
+    ${team_override[@]+"${team_override[@]}"} \
     build
 
 built="$derived/Build/Products/Release/$app_name"

@@ -1,15 +1,16 @@
 # AI Usage Sidebar
 
-A cmux sidebar that shows the rate-limit usage of every local AI agent account:
-two Claude Code accounts, two Codex accounts, and two Antigravity accounts.
+A [cmux](https://github.com/manaflow-ai/cmux) sidebar that shows how much of its
+rate limit each local AI agent account has spent. It reads Claude Code, Codex,
+and Antigravity accounts, including second accounts of the same agent.
 
 cmux shows one sidebar at a time, so an extension sidebar replaces the built-in
 one. This sidebar therefore also lists the cmux workspaces and switches between
 them.
 
-Drag the divider to change how the height is shared. Double-click it to fit the
-workspace list to its rows again. The usage section also collapses from its
-header, and the clock button shows when each window resets.
+Drag the divider to change how the two halves share the height. Double-click the
+divider to fit the workspace list to its rows again. The usage section collapses
+from its header. The clock button shows when each window resets.
 
 ```
 AI USAGE                              2 min ago  ⟳
@@ -31,18 +32,15 @@ CODEX
 ANTIGRAVITY
 ● agy1
   GEMINI MODELS
-  weekly ▓░░░░░░░░░░░░░░░░               1%
-  5h     ░░░░░░░░░░░░░░░░░               0%
-  CLAUDE AND GPT MODELS
-  weekly ░░░░░░░░░░░░░░░░░               0%
-  5h     ░░░░░░░░░░░░░░░░░               0%
+  7d   ▓░░░░░░░░░░░░░░░░░                1%
+  5h   ░░░░░░░░░░░░░░░░░░                0%
 ○ agy2
   Not signed in
 ```
 
 ## Architecture
 
-Two components, because a cmux sidebar extension is sandboxed.
+The project has two components, because a cmux sidebar extension is sandboxed.
 
 ```
   aiusaged (LaunchAgent, unsandboxed)          AI Usage Sidebar.appex (sandboxed)
@@ -53,42 +51,89 @@ Two components, because a cmux sidebar extension is sandboxed.
   └── serves JSON on 127.0.0.1:47823  ────────▶└── polls that URL every 60s
 ```
 
-The extension cannot read the keychain or the credential files, and App Groups
-need a provisioning profile that a personal team does not get. An outgoing
-loopback socket is the one channel that works with `network.client` alone. The
-extension therefore never holds a token.
+The extension cannot read the keychain or the credential files. App Groups need
+a provisioning profile that a personal team does not get. An outgoing loopback
+socket is the one channel that works with `network.client` alone. The extension
+therefore never holds a token.
+
+No credential and no usage figure leaves your machine, except in the request
+that each agent vendor already receives from its own CLI.
 
 ## Requirements
 
 - macOS 14 or newer.
-- **cmux 0.64.20 or newer.** Earlier builds have no sidebar extension point.
-  Check with `cmux --version`.
-- An Apple Development signing identity.
+- cmux 0.64.20 or newer. Earlier builds have no sidebar extension point. Run
+  `cmux --version` to check.
+- Xcode 16 or newer.
+- An Apple Development signing identity. A free personal team is sufficient.
 
 ## Install
 
+Do these steps one time.
+
+### 1. Set your signing team
+
+The project file holds the original author's team ID. You cannot sign with it.
+Find your own team ID in Xcode. Open Settings, then select Accounts.
+Export the ID before you build:
+
 ```bash
-./scripts/fetch-sdk.sh        # vendor the cmux extension SDK (once)
-./scripts/install-daemon.sh   # build + LaunchAgent + first snapshot
-./scripts/install-app.sh      # build + register the extension
+export DEVELOPMENT_TEAM=ABCDE12345
 ```
 
-Then enable the extension in cmux:
+`install-app.sh` reads this variable. Your checkout stays unmodified.
 
-1. Open Settings, go to **Advanced**, and turn on the **Extensions**
-   experimental toggle. The puzzle button does not exist until you do this.
-2. Click the puzzle button next to the sidebar help button.
-3. Open **Sidebar Extensions** and enable **AI Usage**.
-4. Choose the extension sidebar provider from the same menu.
+### 2. Get the cmux SDK
 
-Enable one entry only. If the list shows the same extension more than once,
-Launch Services holds a stale build copy. Run `install-app.sh` again to remove
-it.
+```bash
+./scripts/fetch-sdk.sh
+```
 
-## Configure
+The script clones cmux and keeps the extension SDK in `vendor/`. cmux has no
+package manifest at its root, so SwiftPM cannot fetch the SDK as a remote
+dependency.
 
-`~/.config/ai-usage/config.json` is written on first run. It lists one entry per
-account:
+### 3. Install the daemon
+
+```bash
+./scripts/install-daemon.sh
+```
+
+The script builds `aiusaged` and installs the binary in `~/.local/bin`. It then
+starts a LaunchAgent and waits for the first snapshot. The daemon writes a
+default config file at the first start. Step 6 shows how to change that file.
+
+### 4. Install the extension
+
+```bash
+./scripts/install-app.sh
+```
+
+The script builds the app and copies it to `/Applications`. It opens the app one
+time, because macOS finds an extension only after the containing app runs.
+
+### 5. Select the sidebar in cmux
+
+1. Open Settings and select Advanced. Set the Extensions toggle to on.
+   The puzzle button stays hidden until this toggle is on.
+2. Click the puzzle button. It is adjacent to the sidebar help button.
+3. Select Sidebar Extensions and enable AI Usage.
+4. Select the extension sidebar provider in the same menu.
+
+Enable one entry only. If the list shows AI Usage more than one time, Launch
+Services holds a stale build copy. Run `./scripts/install-app.sh` again. The
+script removes the stale copies.
+
+### 6. Set your accounts
+
+Edit `~/.config/ai-usage/config.json`. The default file lists the author's
+accounts, so replace those entries with your own. Then restart the daemon:
+
+```bash
+launchctl kickstart -k "gui/$UID/dev.jcsnap.aiusaged"
+```
+
+The file lists one entry per account:
 
 ```json
 {
@@ -105,7 +150,8 @@ account:
 }
 ```
 
-Each provider reads a different credential store, which is why the fields differ:
+Each provider keeps its credential in a different store. The fields differ for
+that reason:
 
 | provider | field | credential |
 |---|---|---|
@@ -113,17 +159,33 @@ Each provider reads a different credential store, which is why the fields differ
 | `codex` | `codexHome` | `$CODEX_HOME/auth.json` |
 | `antigravity` | `home` | `<home>/.gemini/antigravity-cli/antigravity-oauth-token` |
 
-To find the keychain service name for a second Claude account, run:
+Claude Code derives a keychain suffix from `CLAUDE_CONFIG_DIR`. To find the
+service name of a second Claude account, run:
 
 ```bash
 security dump-keychain | grep -o '"Claude Code[^"]*"' | sort -u
 ```
 
-Claude Code derives the suffix from `CLAUDE_CONFIG_DIR`.
+## Verify
+
+Print one snapshot without the daemon:
+
+```bash
+swift run aiusaged --once
+```
+
+Read what the running daemon serves:
+
+```bash
+curl -s http://127.0.0.1:47823/ | python3 -m json.tool
+```
+
+The daemon writes its log to `~/Library/Logs/ai-usage/aiusaged.log`.
 
 ## Endpoints
 
-Each provider exposes usage over its own OAuth token.
+Each provider exposes usage over its own OAuth token. None of these endpoints is
+documented. Each one can change without notice.
 
 | provider | request |
 |---|---|
@@ -134,24 +196,13 @@ Each provider exposes usage over its own OAuth token.
 Two behaviours are easy to misdiagnose:
 
 - The Antigravity endpoint answers `403 PERMISSION_DENIED` unless the
-  `User-Agent` names the antigravity client. It is client sniffing, not a
+  `User-Agent` names the antigravity client. That is client sniffing, not a
   missing OAuth scope.
-- A logged-out Claude profile still has a keychain item, holding only
-  `mcpOAuth`. The item existing is not proof of a login.
+- A logged-out Claude profile still has a keychain item. That item holds only
+  `mcpOAuth`. Its presence is not proof of a login.
 
-The Antigravity endpoint is `v1internal:` and can change without notice.
-
-## Develop
-
-```bash
-swift build && swift test          # daemon
-./.build/debug/aiusaged --once     # print one snapshot and exit
-./scripts/sync-models.sh           # after editing Sources/UsageModels
-```
-
-The extension target keeps a generated copy of the wire types, because it is a
-separate Xcode target and cannot link the SPM library. `sync-models.sh` copies
-them; do not edit the generated file.
+Antigravity also names its windows in words. `weekly` becomes `7d` at the fetch
+layer, so one column width fits every provider.
 
 ## Permissions
 
@@ -164,8 +215,23 @@ The extension asks cmux for the least it needs to draw the workspace list:
 | `workspacePaths` | project root headings and row subtitles |
 | `selectWorkspace` | switch workspace when you click a row |
 
-It never requests surfaces, notifications, ports, or pull requests. Usage data
-does not come through cmux at all — it comes from the daemon.
+The extension never asks for surfaces, notifications, ports, or pull requests.
+Usage data does not come through cmux at all. It comes from the daemon.
+
+## Develop
+
+```bash
+swift build && swift test          # daemon
+./.build/debug/aiusaged --once     # print one snapshot and exit
+./scripts/sync-models.sh           # after you edit Sources/UsageModels
+```
+
+The extension target keeps a generated copy of the wire types, because it is a
+separate Xcode target and cannot link the SwiftPM library. `sync-models.sh`
+copies them. Do not edit the generated file.
+
+Add a provider in three steps. Add a case to `UsageProvider`. Add a client that
+conforms to `UsageProviderClient`. Add the credential field to `AccountConfig`.
 
 ## Layout
 

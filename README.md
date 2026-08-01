@@ -149,8 +149,6 @@ The extension target keeps a generated copy of the wire types, because it is a
 separate Xcode target and cannot link the SPM library. `sync-models.sh` copies
 them; do not edit the generated file.
 
-## Layout
-
 ## Permissions
 
 The extension asks cmux for the least it needs to draw the workspace list:

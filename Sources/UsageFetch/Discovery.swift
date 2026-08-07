@@ -4,10 +4,11 @@ import UsageModels
 /// Finds the agent accounts that exist on this machine.
 ///
 /// Every agent CLI supports more than one account by pointing an environment
-/// variable at a second store: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and for
-/// Antigravity a whole `HOME` override. Those names are the user's choice, so a
-/// shipped account list only ever fits the machine it was written on. Discovery
-/// reads the stores that are actually present and builds the list from them.
+/// variable at a second store: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`,
+/// and for Antigravity a whole `HOME` override. Those names are the user's
+/// choice, so a shipped account list only ever fits the machine it was written
+/// on. Discovery reads the stores that are actually present and builds the list
+/// from them.
 ///
 /// The scan is deliberately shallow. It looks at the login keychain and at the
 /// direct children of the home directory, never deeper, so it stays fast and
@@ -22,6 +23,7 @@ public enum Discovery {
     public static func accounts(home: String = NSHomeDirectory()) -> [AccountConfig] {
         claudeAccounts(services: claudeKeychainServices())
             + codexAccounts(directories: codexDirectories(home: home), home: home)
+            + grokAccounts(directories: grokDirectories(home: home), home: home)
             + antigravityAccounts(homes: antigravityHomes(home: home), home: home)
     }
 
@@ -78,6 +80,25 @@ public enum Discovery {
                 provider: .codex,
                 displayName: numbered("codex", index),
                 codexHome: tilde(path, home: home))
+        }
+    }
+
+    // MARK: - Grok
+
+    /// Grok keeps its OAuth credential under `GROK_HOME`, using the same
+    /// direct-child convention as Codex for additional profiles.
+    static func grokDirectories(home: String) -> [String] {
+        childDirectories(of: home, prefix: ".grok")
+            .filter { FileManager.default.fileExists(atPath: $0 + "/auth.json") }
+    }
+
+    static func grokAccounts(directories: [String], home: String) -> [AccountConfig] {
+        directories.enumerated().map { index, path in
+            AccountConfig(
+                id: numbered("grok", index),
+                provider: .grok,
+                displayName: numbered("grok", index),
+                grokHome: tilde(path, home: home))
         }
     }
 

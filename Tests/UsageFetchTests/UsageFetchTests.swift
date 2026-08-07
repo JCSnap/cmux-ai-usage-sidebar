@@ -128,6 +128,29 @@ import UsageModels
     #expect(antigravity.map(\.id) == ["antigravity", "antigravity-2"])
 }
 
+@Test func discoveredGrokPathsAreStableAndUseTildes() {
+    let accounts = Discovery.grokAccounts(
+        directories: ["/Users/jane/.grok", "/Users/jane/.grok-work"],
+        home: "/Users/jane")
+    #expect(accounts.map(\.id) == ["grok", "grok-2"])
+    #expect(accounts.map(\.grokHome) == ["~/.grok", "~/.grok-work"])
+}
+
+@Test func grokDiscoveryRequiresAnAuthFile() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(
+        at: root.appendingPathComponent(".grok", isDirectory: true),
+        withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(
+        at: root.appendingPathComponent(".grok-empty", isDirectory: true),
+        withIntermediateDirectories: true)
+    try Data("{}".utf8).write(to: root.appendingPathComponent(".grok/auth.json"))
+
+    #expect(Discovery.grokDirectories(home: root.path) == [root.path + "/.grok"])
+}
+
 @Test func discoveryFindsNothingWhenNoAgentIsInstalled() {
     // An empty result must stay empty rather than fall back to an invented
     // account, because a phantom account reads as a broken login in the sidebar.

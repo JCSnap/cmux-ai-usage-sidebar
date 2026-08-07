@@ -10,6 +10,8 @@ public struct AccountConfig: Codable, Sendable {
     public let keychainService: String?
     /// Codex: directory that holds `auth.json` (the `CODEX_HOME` value).
     public let codexHome: String?
+    /// Grok: directory that holds `auth.json` (the `GROK_HOME` value).
+    public let grokHome: String?
     /// Antigravity: the `HOME` the account runs under.
     public let home: String?
 
@@ -19,6 +21,7 @@ public struct AccountConfig: Codable, Sendable {
         displayName: String,
         keychainService: String? = nil,
         codexHome: String? = nil,
+        grokHome: String? = nil,
         home: String? = nil
     ) {
         self.id = id
@@ -26,6 +29,7 @@ public struct AccountConfig: Codable, Sendable {
         self.displayName = displayName
         self.keychainService = keychainService
         self.codexHome = codexHome
+        self.grokHome = grokHome
         self.home = home
     }
 }

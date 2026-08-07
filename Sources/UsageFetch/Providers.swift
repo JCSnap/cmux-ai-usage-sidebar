@@ -111,6 +111,71 @@ struct CodexClient: UsageProviderClient {
     }
 }
 
+// MARK: - Grok
+
+struct GrokCredential {
+    let accessToken: String
+    let refreshToken: String?
+    let expiresAt: Date?
+    let email: String?
+    let issuer: String?
+    let clientID: String?
+}
+
+/// Credential: plain file `$GROK_HOME/auth.json`. The root is keyed by issuer
+/// and client ID, with one OAuth session object beneath each key.
+struct GrokClient: UsageProviderClient {
+    func fetch(_ account: AccountConfig) async throws -> ProviderReading {
+        let home = (account.grokHome ?? "~/.grok").expandedPath
+        let url = URL(fileURLWithPath: home).appendingPathComponent("auth.json")
+        guard let data = try? Data(contentsOf: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Self.credential(in: root) != nil
+        else { throw FetchError.noCredential }
+        throw FetchError.badPayload("Grok billing not implemented")
+    }
+
+    static func credential(in root: [String: Any]) -> GrokCredential? {
+        for key in root.keys.sorted() {
+            guard let entry = root.dict(key),
+                  let accessToken = entry.string("key"), !accessToken.isEmpty
+            else { continue }
+            return GrokCredential(
+                accessToken: accessToken,
+                refreshToken: entry.string("refresh_token"),
+                expiresAt: entry.string("expires_at").flatMap(Date.fromISO8601),
+                email: entry.string("email"),
+                issuer: entry.string("oidc_issuer"),
+                clientID: entry.string("oidc_client_id"))
+        }
+        return nil
+    }
+
+    static func reading(from payload: [String: Any], email: String?) throws -> ProviderReading {
+        guard let config = payload.dict("config"),
+              let usedPercent = config.double("creditUsagePercent")
+        else { throw FetchError.badPayload("no creditUsagePercent") }
+
+        let period = config.dict("currentPeriod")
+        let startsAt = period?.string("start").flatMap(Date.fromISO8601)
+        let resetsAt = period?.string("end").flatMap(Date.fromISO8601)
+        let label: String
+        if let startsAt, let resetsAt, resetsAt > startsAt {
+            label = CodexClient.label(
+                forWindowSeconds: Int(resetsAt.timeIntervalSince(startsAt).rounded()))
+        } else {
+            label = "—"
+        }
+
+        return ProviderReading(
+            email: email,
+            windows: [UsageWindow(
+                label: label,
+                usedFraction: max(0, min(100, usedPercent)) / 100,
+                resetsAt: resetsAt)])
+    }
+}
+
 // MARK: - Antigravity
 
 /// Credential: `<home>/.gemini/antigravity-cli/antigravity-oauth-token`.

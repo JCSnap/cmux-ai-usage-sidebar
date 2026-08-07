@@ -21,6 +21,66 @@ import UsageModels
     #expect(AntigravityClient.label(forWindow: "hourly") == "hourly")
 }
 
+@Test func grokCredentialReadsTheStoredOidcSession() throws {
+    let auth: [String: Any] = [
+        "https://auth.x.ai::client": [
+            "key": "access",
+            "refresh_token": "refresh",
+            "expires_at": "2026-08-07T21:26:17Z",
+            "email": "person@example.com",
+            "oidc_issuer": "https://auth.x.ai",
+            "oidc_client_id": "client",
+        ]
+    ]
+
+    let credential = try #require(GrokClient.credential(in: auth))
+    #expect(credential.accessToken == "access")
+    #expect(credential.refreshToken == "refresh")
+    #expect(credential.email == "person@example.com")
+    #expect(credential.issuer == "https://auth.x.ai")
+    #expect(credential.clientID == "client")
+    #expect(credential.expiresAt != nil)
+}
+
+@Test func grokCredentialRejectsAnUnusableEntry() {
+    #expect(GrokClient.credential(in: [:]) == nil)
+    #expect(GrokClient.credential(in: ["entry": ["email": "person@example.com"]]) == nil)
+}
+
+@Test func grokBillingConvertsTheWeeklyCreditWindow() throws {
+    let payload: [String: Any] = ["config": [
+        "creditUsagePercent": 42.0,
+        "currentPeriod": [
+            "type": "USAGE_PERIOD_TYPE_WEEKLY",
+            "start": "2026-08-01T19:17:43.386846+00:00",
+            "end": "2026-08-08T19:17:43.386846+00:00",
+        ],
+    ]]
+
+    let reading = try GrokClient.reading(from: payload, email: "person@example.com")
+    #expect(reading.email == "person@example.com")
+    #expect(reading.windows.count == 1)
+    #expect(reading.windows[0].label == "7d")
+    #expect(reading.windows[0].usedFraction == 0.42)
+    #expect(reading.windows[0].resetsAt != nil)
+}
+
+@Test func grokBillingClampsPercentAndToleratesAnUnknownPeriod() throws {
+    let over: [String: Any] = ["config": ["creditUsagePercent": 142.0]]
+    let under: [String: Any] = ["config": ["creditUsagePercent": -5.0]]
+
+    #expect(try GrokClient.reading(from: over, email: nil).windows[0].usedFraction == 1)
+    #expect(try GrokClient.reading(from: under, email: nil).windows[0].usedFraction == 0)
+    #expect(try GrokClient.reading(from: over, email: nil).windows[0].label == "—")
+    #expect(try GrokClient.reading(from: over, email: nil).windows[0].resetsAt == nil)
+}
+
+@Test func grokBillingRequiresAnAggregatePercentage() {
+    #expect(throws: FetchError.self) {
+        try GrokClient.reading(from: ["config": [:]], email: nil)
+    }
+}
+
 @Test func everyClientPairIsTriedBecauseTheBinaryHoldsMoreThanOne() {
     // Nothing in the binary layout says which id belongs to which secret, so
     // every combination has to be a candidate.

@@ -75,13 +75,19 @@ import UsageModels
         UsageAccount(
             id: "agy1", provider: .antigravity, displayName: "agy1", state: .ok,
             windows: [UsageWindow(group: "Gemini Models", label: "weekly", usedFraction: 0.0135)]),
+        UsageAccount(
+            id: "grok", provider: .grok, displayName: "grok", plan: "SuperGrok",
+            email: "person@example.com", state: .ok,
+            windows: [UsageWindow(label: "7d", usedFraction: 0.42)]),
         UsageAccount(id: "cc2", provider: .claude, displayName: "cc2", state: .signedOut),
     ])
     let data = try UsageSnapshot.encoder().encode(snapshot)
     let decoded = try UsageSnapshot.decoder().decode(UsageSnapshot.self, from: data)
     #expect(decoded == snapshot)
     #expect(decoded.accounts[0].windows[0].group == "Gemini Models")
-    #expect(decoded.accounts[1].state == .signedOut)
+    #expect(decoded.accounts[1].provider == .grok)
+    #expect(decoded.accounts[1].windows[0].usedFraction == 0.42)
+    #expect(decoded.accounts[2].state == .signedOut)
 }
 
 @Test func keychainDumpYieldsEveryClaudeProfile() {

@@ -4,12 +4,14 @@ import Foundation
 public enum UsageProvider: String, Codable, Sendable, CaseIterable {
     case claude
     case codex
+    case grok
     case antigravity
 
     public var displayName: String {
         switch self {
         case .claude: "Claude Code"
         case .codex: "Codex"
+        case .grok: "Grok"
         case .antigravity: "Antigravity"
         }
     }

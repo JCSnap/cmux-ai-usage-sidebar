@@ -2,7 +2,7 @@
 
 A [cmux](https://github.com/manaflow-ai/cmux) sidebar that shows how much of its
 rate limit each local AI agent account has spent. It reads Claude Code, Codex,
-and Antigravity accounts, including second accounts of the same agent.
+Grok, and Antigravity accounts, including second accounts of the same agent.
 
 ![The sidebar inside cmux, with the workspace list above the usage panel](docs/sidebar.png)
 
@@ -31,8 +31,9 @@ The project has two components, because a cmux sidebar extension is sandboxed.
   aiusaged (LaunchAgent, unsandboxed)          AI Usage Sidebar.appex (sandboxed)
   ├── reads the login keychain                 ├── entitlement: network.client only
   ├── reads ~/.codex*/auth.json                │
+  ├── reads ~/.grok*/auth.json                 │
   ├── refreshes the Antigravity token          │
-  ├── calls the three usage APIs               │
+  ├── calls the four usage APIs                │
   └── serves JSON on 127.0.0.1:47823  ────────▶└── polls that URL every 60s
 ```
 
@@ -140,10 +141,10 @@ to `~/.config/ai-usage/config.json`. To see the same list without a write, run:
 ```
 
 Discovery reads the login keychain for `Claude Code-credentials*` items. It looks
-for `auth.json` under each `~/.codex*` directory. It looks for an Antigravity
-token under your home directory and its dot-directories. It names the first
-account of each kind plainly and numbers the rest: `claude`, `claude-2`, `codex`,
-`codex-2`.
+for `auth.json` under each `~/.codex*` and `~/.grok*` directory. It looks for an
+Antigravity token under your home directory and its dot-directories. It names
+the first account of each kind plainly and numbers the rest: `claude`,
+`claude-2`, `codex`, `codex-2`, `grok`, `grok-2`.
 
 Edit the file for two reasons. Rename an account to what you call it, because
 `claude-2` says nothing. Add an account that is signed out, because a store with
@@ -166,6 +167,8 @@ The file lists one entry per account:
       "keychainService": "Claude Code-credentials" },
     { "id": "c1", "provider": "codex", "displayName": "c1",
       "codexHome": "~/.codex" },
+    { "id": "grok", "provider": "grok", "displayName": "grok",
+      "grokHome": "~/.grok" },
     { "id": "agy1", "provider": "antigravity", "displayName": "agy1",
       "home": "~" }
   ]
@@ -179,6 +182,7 @@ that reason:
 |---|---|---|
 | `claude` | `keychainService` | login keychain item |
 | `codex` | `codexHome` | `$CODEX_HOME/auth.json` |
+| `grok` | `grokHome` | `$GROK_HOME/auth.json` |
 | `antigravity` | `home` | `<home>/.gemini/antigravity-cli/antigravity-oauth-token` |
 
 Claude Code derives a keychain suffix from `CLAUDE_CONFIG_DIR`. To find the
@@ -219,6 +223,7 @@ documented. Each one can change without notice.
 |---|---|
 | Claude | `GET api.anthropic.com/api/oauth/usage`, header `anthropic-beta: oauth-2025-04-20` |
 | Codex | `GET chatgpt.com/backend-api/wham/usage`, header `chatgpt-account-id` |
+| Grok | `GET cli-chat-proxy.grok.com/v1/billing?format=credits` |
 | Antigravity | `POST cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` |
 
 Two behaviours are easy to misdiagnose:

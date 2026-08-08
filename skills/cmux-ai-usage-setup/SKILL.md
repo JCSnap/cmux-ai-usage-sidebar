@@ -1,6 +1,6 @@
 ---
 name: cmux-ai-usage-setup
-description: Installs and configures the cmux AI Usage Sidebar on this machine. It finds the local Claude Code, Codex, and Antigravity accounts, writes the account config, builds the sidebar extension with the correct signing team, and fixes the usual install failures. Use this skill whenever the user wants to install, set up, configure, rename accounts in, or repair the cmux AI usage sidebar or the aiusaged daemon, and also when they say the sidebar shows no accounts, shows the wrong accounts, shows an account twice, or says a daemon is unreachable.
+description: Use when the user wants to install, set up, configure, rename accounts in, or repair the cmux AI usage sidebar or aiusaged daemon, or when the sidebar shows no accounts, wrong accounts, duplicate accounts, provider errors, or a daemon-unreachable message.
 ---
 
 # Set up the cmux AI Usage Sidebar
@@ -81,10 +81,10 @@ Ask the daemon what it can find:
 ```
 
 Discovery reads the login keychain for `Claude Code-credentials*` items, looks
-for `auth.json` under each `~/.codex*` directory, and looks for an Antigravity
-token under the home directory and its dot-directories. It names the first
-account of each kind plainly and numbers the rest: `claude`, `claude-2`, `codex`,
-`codex-2`.
+for `auth.json` under each `~/.codex*` and `~/.grok*` directory, and looks for an
+Antigravity token under the home directory and its dot-directories. It names the
+first account of each kind plainly and numbers the rest: `claude`, `claude-2`,
+`codex`, `codex-2`, `grok`, `grok-2`.
 
 Now reconcile that list with what the user actually has. Show them the result and
 ask two questions.
@@ -98,6 +98,7 @@ in, add it by hand. Each provider needs a different field:
 |---|---|---|
 | `claude` | `keychainService` | the login keychain item name |
 | `codex` | `codexHome` | the `CODEX_HOME` directory |
+| `grok` | `grokHome` | the `GROK_HOME` directory containing `auth.json` |
 | `antigravity` | `home` | the `HOME` that account runs under |
 
 To list the Claude keychain items directly:

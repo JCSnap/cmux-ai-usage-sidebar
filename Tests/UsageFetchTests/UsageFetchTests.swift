@@ -81,6 +81,27 @@ import UsageModels
     }
 }
 
+@Test func grokRequestTargetsTheCreditsEndpoint() {
+    let request = GrokClient.billingRequest(accessToken: "access")
+    #expect(request.url?.absoluteString
+        == "https://cli-chat-proxy.grok.com/v1/billing?format=credits")
+    #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access")
+    #expect(request.value(forHTTPHeaderField: "Accept") == "application/json")
+}
+
+@Test func grokRequestRefreshesThroughTheStoredOidcClient() throws {
+    let request = GrokClient.refreshRequest(refreshToken: "refresh token", clientID: "client")
+    #expect(request.url?.absoluteString == "https://auth.x.ai/oauth2/token")
+    #expect(request.httpMethod == "POST")
+
+    let body = try #require(request.httpBody)
+    let fields = URLComponents(string: "?" + String(decoding: body, as: UTF8.self))?.queryItems
+    let values = Dictionary(uniqueKeysWithValues: (fields ?? []).map { ($0.name, $0.value) })
+    #expect(values["grant_type"] == "refresh_token")
+    #expect(values["refresh_token"] == "refresh token")
+    #expect(values["client_id"] == "client")
+}
+
 @Test func everyClientPairIsTriedBecauseTheBinaryHoldsMoreThanOne() {
     // Nothing in the binary layout says which id belongs to which secret, so
     // every combination has to be a candidate.

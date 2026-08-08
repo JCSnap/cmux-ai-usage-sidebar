@@ -130,9 +130,62 @@ struct GrokClient: UsageProviderClient {
         let url = URL(fileURLWithPath: home).appendingPathComponent("auth.json")
         guard let data = try? Data(contentsOf: url),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Self.credential(in: root) != nil
+              let credential = Self.credential(in: root)
         else { throw FetchError.noCredential }
-        throw FetchError.badPayload("Grok billing not implemented")
+
+        var accessToken = credential.accessToken
+        var didRefresh = false
+        if credential.expiresAt.map({ $0 <= Date() }) == true {
+            accessToken = try await Self.refresh(credential)
+            didRefresh = true
+        }
+
+        var (billingData, response) = try await Http.response(
+            Self.billingRequest(accessToken: accessToken))
+        if response.statusCode == 401, !didRefresh {
+            accessToken = try await Self.refresh(credential)
+            didRefresh = true
+            (billingData, response) = try await Http.response(
+                Self.billingRequest(accessToken: accessToken))
+        }
+        guard (200..<300).contains(response.statusCode) else {
+            throw FetchError.badStatus(
+                response.statusCode, String(decoding: billingData, as: UTF8.self))
+        }
+        guard let payload = try JSONSerialization.jsonObject(with: billingData) as? [String: Any]
+        else { throw FetchError.badPayload("not a JSON object") }
+        return try Self.reading(from: payload, email: credential.email)
+    }
+
+    static func billingRequest(accessToken: String) -> URLRequest {
+        Http.get(
+            "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+            headers: [
+                "Authorization": "Bearer \(accessToken)",
+                "Accept": "application/json",
+            ])
+    }
+
+    static func refreshRequest(refreshToken: String, clientID: String) -> URLRequest {
+        Http.form(
+            "https://auth.x.ai/oauth2/token",
+            fields: [
+                "grant_type": "refresh_token",
+                "refresh_token": refreshToken,
+                "client_id": clientID,
+            ])
+    }
+
+    private static func refresh(_ credential: GrokCredential) async throws -> String {
+        guard let refreshToken = credential.refreshToken, !refreshToken.isEmpty,
+              let clientID = credential.clientID, !clientID.isEmpty
+        else { throw FetchError.noCredential }
+        let payload = try await Http.json(
+            refreshRequest(refreshToken: refreshToken, clientID: clientID))
+        guard let accessToken = payload.string("access_token"), !accessToken.isEmpty else {
+            throw FetchError.badPayload("token refresh returned no access_token")
+        }
+        return accessToken
     }
 
     static func credential(in root: [String: Any]) -> GrokCredential? {

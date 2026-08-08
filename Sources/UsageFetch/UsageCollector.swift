@@ -7,6 +7,7 @@ public struct UsageCollector: Sendable {
     private let clients: [UsageProvider: any UsageProviderClient] = [
         .claude: ClaudeClient(),
         .codex: CodexClient(),
+        .grok: GrokClient(),
         .antigravity: AntigravityClient(),
     ]
 

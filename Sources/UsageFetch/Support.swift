@@ -58,10 +58,20 @@ enum Http {
         return URLSession(configuration: config)
     }()
 
+    /// Performs a request without interpreting its status code. Providers that
+    /// need status-aware recovery (such as an OAuth retry on 401) use this.
+    static func response(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await session.data(for: request)
+        guard let response = response as? HTTPURLResponse else {
+            throw FetchError.badStatus(0, String(decoding: data, as: UTF8.self))
+        }
+        return (data, response)
+    }
+
     /// Performs a request and returns the body, or throws with the status text.
     static func data(_ request: URLRequest) async throws -> Data {
-        let (data, response) = try await session.data(for: request)
-        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let (data, response) = try await response(request)
+        let code = response.statusCode
         guard (200..<300).contains(code) else {
             throw FetchError.badStatus(code, String(decoding: data, as: UTF8.self))
         }

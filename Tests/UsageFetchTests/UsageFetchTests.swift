@@ -47,6 +47,77 @@ import UsageModels
     #expect(GrokClient.credential(in: ["entry": ["email": "person@example.com"]]) == nil)
 }
 
+@Test func grokCredentialRejectsTokensFromAnotherIssuer() {
+    let auth: [String: Any] = [
+        "a-https://other.example::client": [
+            "key": "must-not-be-sent-to-xai",
+            "refresh_token": "must-not-be-sent-to-xai",
+            "oidc_issuer": "https://other.example",
+            "oidc_client_id": "client",
+        ],
+        "z-https://auth.x.ai::client": [
+            "key": "xai-access",
+            "oidc_issuer": "https://auth.x.ai",
+            "oidc_client_id": "client",
+        ],
+    ]
+    #expect(GrokClient.credential(in: auth)?.accessToken == "xai-access")
+    #expect(GrokClient.credential(in: ["entry": auth["a-https://other.example::client"]!]) == nil)
+}
+
+@Test func malformedGrokAuthIsAnErrorRatherThanSignedOut() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let auth = root.appendingPathComponent("auth.json")
+    try Data("not json".utf8).write(to: auth)
+
+    do {
+        _ = try GrokClient.credential(at: auth)
+        Issue.record("malformed auth.json unexpectedly parsed")
+    } catch FetchError.badPayload {
+        // Expected: the collector renders this as an error, not signedOut.
+    } catch {
+        Issue.record("malformed auth.json threw \(error) instead of badPayload")
+    }
+}
+
+@Test func grokRefreshPersistsRotatedTokensAtomically() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let auth = root.appendingPathComponent("auth.json")
+    let storageKey = "https://auth.x.ai::client"
+    let original: [String: Any] = [storageKey: [
+        "key": "old-access",
+        "refresh_token": "old-refresh",
+        "expires_at": "2026-08-01T00:00:00Z",
+        "email": "person@example.com",
+        "oidc_issuer": "https://auth.x.ai",
+        "oidc_client_id": "client",
+    ]]
+    try JSONSerialization.data(withJSONObject: original).write(to: auth)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: auth.path)
+    let credential = try GrokClient.credential(at: auth)
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+
+    try GrokClient.persist(
+        refresh: GrokRefresh(
+            accessToken: "new-access", refreshToken: "new-refresh", expiresIn: 3_600),
+        credential: credential, at: auth, now: now)
+
+    let updated = try JSONSerialization.jsonObject(with: Data(contentsOf: auth)) as! [String: Any]
+    let entry = try #require(updated[storageKey] as? [String: Any])
+    #expect(entry["key"] as? String == "new-access")
+    #expect(entry["refresh_token"] as? String == "new-refresh")
+    #expect(entry["email"] as? String == "person@example.com")
+    #expect((entry["expires_at"] as? String).flatMap(Date.fromISO8601) == now.addingTimeInterval(3_600))
+    let attributes = try FileManager.default.attributesOfItem(atPath: auth.path)
+    #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+}
+
 @Test func grokBillingConvertsTheWeeklyCreditWindow() throws {
     let payload: [String: Any] = ["config": [
         "creditUsagePercent": 42.0,
@@ -100,6 +171,104 @@ import UsageModels
     #expect(values["grant_type"] == "refresh_token")
     #expect(values["refresh_token"] == "refresh token")
     #expect(values["client_id"] == "client")
+}
+
+private actor GrokHTTPStub {
+    struct Reply: Sendable {
+        let status: Int
+        let body: String
+    }
+
+    private var replies: [Reply]
+    private var requests: [URLRequest] = []
+
+    init(_ replies: [Reply]) { self.replies = replies }
+
+    func send(_ request: URLRequest) throws -> (Data, HTTPURLResponse) {
+        requests.append(request)
+        guard !replies.isEmpty else { throw FetchError.badPayload("unexpected request") }
+        let reply = replies.removeFirst()
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: reply.status,
+            httpVersion: "HTTP/1.1", headerFields: nil)!
+        return (Data(reply.body.utf8), response)
+    }
+
+    func recordedRequests() -> [URLRequest] { requests }
+}
+
+private let grokBillingFixture = """
+{"config":{"creditUsagePercent":42,"currentPeriod":{
+"start":"2026-08-01T19:17:43Z","end":"2026-08-08T19:17:43Z"}}}
+"""
+
+private func grokCredential(expiresAt: Date?) -> GrokCredential {
+    GrokCredential(
+        storageKey: "https://auth.x.ai::client",
+        accessToken: "stored-access", refreshToken: "refresh", expiresAt: expiresAt,
+        email: "person@example.com", issuer: "https://auth.x.ai", clientID: "client")
+}
+
+@Test func expiredGrokTokenRefreshesBeforeBilling() async throws {
+    let stub = GrokHTTPStub([
+        .init(status: 200, body: #"{"access_token":"fresh-access"}"#),
+        .init(status: 200, body: grokBillingFixture),
+    ])
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+
+    let reading = try await GrokClient.fetch(
+        credential: grokCredential(expiresAt: now.addingTimeInterval(-1)), now: now,
+        send: { try await stub.send($0) })
+
+    #expect(reading.windows[0].usedFraction == 0.42)
+    let requests = await stub.recordedRequests()
+    #expect(requests.map { $0.url?.path } == ["/oauth2/token", "/v1/billing"])
+    #expect(requests[1].value(forHTTPHeaderField: "Authorization") == "Bearer fresh-access")
+}
+
+@Test func grokBilling401RefreshesAndRetriesExactlyOnce() async throws {
+    let stub = GrokHTTPStub([
+        .init(status: 401, body: "unauthorized"),
+        .init(status: 200, body: #"{"access_token":"fresh-access"}"#),
+        .init(status: 200, body: grokBillingFixture),
+    ])
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+
+    _ = try await GrokClient.fetch(
+        credential: grokCredential(expiresAt: now.addingTimeInterval(3_600)), now: now,
+        send: { try await stub.send($0) })
+
+    let requests = await stub.recordedRequests()
+    #expect(requests.map { $0.url?.path } == ["/v1/billing", "/oauth2/token", "/v1/billing"])
+    #expect(requests[2].value(forHTTPHeaderField: "Authorization") == "Bearer fresh-access")
+}
+
+@Test func grokBillingNon401DoesNotRefresh() async {
+    let stub = GrokHTTPStub([.init(status: 503, body: "unavailable")])
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+
+    await #expect(throws: FetchError.self) {
+        try await GrokClient.fetch(
+            credential: grokCredential(expiresAt: now.addingTimeInterval(3_600)), now: now,
+            send: { try await stub.send($0) })
+    }
+    #expect(await stub.recordedRequests().count == 1)
+}
+
+@Test func grokBillingSecond401SurfacesWithoutAnotherRefresh() async {
+    let stub = GrokHTTPStub([
+        .init(status: 401, body: "unauthorized"),
+        .init(status: 200, body: #"{"access_token":"fresh-access"}"#),
+        .init(status: 401, body: "still unauthorized"),
+    ])
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+
+    await #expect(throws: FetchError.self) {
+        try await GrokClient.fetch(
+            credential: grokCredential(expiresAt: now.addingTimeInterval(3_600)), now: now,
+            send: { try await stub.send($0) })
+    }
+    #expect(await stub.recordedRequests().count == 3)
 }
 
 @Test func everyClientPairIsTriedBecauseTheBinaryHoldsMoreThanOne() {
@@ -230,6 +399,38 @@ import UsageModels
     try Data("{}".utf8).write(to: root.appendingPathComponent(".grok/auth.json"))
 
     #expect(Discovery.grokDirectories(home: root.path) == [root.path + "/.grok"])
+}
+
+@Test func configMigrationAddsDiscoveredGrokWithoutRenamingExistingAccounts() {
+    var config = Config(
+        configVersion: nil,
+        accounts: [AccountConfig(
+            id: "work", provider: .codex, displayName: "Work Codex", codexHome: "~/.codex")])
+    let discovered = [AccountConfig(
+        id: "grok", provider: .grok, displayName: "grok", grokHome: "~/.grok")]
+
+    let migrated = config.migrateIfNeeded(discovered: discovered)
+    #expect(migrated)
+    #expect(config.configVersion == Config.currentVersion)
+    #expect(config.accounts.map(\.id) == ["work", "grok"])
+    #expect(config.accounts[0].displayName == "Work Codex")
+    let migratedAgain = config.migrateIfNeeded(discovered: discovered)
+    #expect(!migratedAgain)
+    #expect(config.accounts.map(\.id) == ["work", "grok"])
+}
+
+@Test func configMigrationDoesNotDuplicateAManuallyConfiguredGrokAccount() {
+    var config = Config(
+        configVersion: nil,
+        accounts: [AccountConfig(
+            id: "xai", provider: .grok, displayName: "Personal", grokHome: "~/.grok")])
+    let discovered = [AccountConfig(
+        id: "grok", provider: .grok, displayName: "grok", grokHome: "~/.grok")]
+
+    let migrated = config.migrateIfNeeded(discovered: discovered)
+    #expect(migrated)
+    #expect(config.accounts.count == 1)
+    #expect(config.accounts[0].id == "xai")
 }
 
 @Test func discoveryFindsNothingWhenNoAgentIsInstalled() {

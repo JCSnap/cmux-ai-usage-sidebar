@@ -37,9 +37,10 @@ multi-profile Codex convention. The default account is written as
 `GrokClient` will read and parse the credential without logging its token. It
 will refresh an expired access token through the credential's OIDC issuer and
 client ID, using the refresh-token grant at
-`https://auth.x.ai/oauth2/token`. A successful refresh is used in memory for
-the current request; the sidebar daemon will not rewrite Grok-owned credential
-files. A 401 from the billing endpoint gets one refresh-and-retry attempt so
+`https://auth.x.ai/oauth2/token`. Because xAI rotates refresh tokens, a
+successful refresh is written atomically into the same issuer entry in
+Grok-owned `auth.json`, preserving unrelated fields and owner-only permissions.
+A 401 from the billing endpoint gets one refresh-and-retry attempt so
 clock skew and server-side invalidation recover without user action.
 
 The billing response becomes one `UsageWindow`: the label is derived from the

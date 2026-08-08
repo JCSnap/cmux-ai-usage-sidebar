@@ -279,8 +279,9 @@ URLSession setup.
 
 Construct the billing GET and refresh form requests. If the stored access
 token is expired, refresh first. Otherwise call billing directly; on 401,
-refresh once and retry once. Decode the refreshed `access_token` in memory and
-do not write `auth.json`.
+refresh once and retry once. Decode the refreshed access and refresh tokens,
+then atomically update the matching issuer entry in `auth.json`; xAI rotates
+refresh tokens, so keeping the result only in memory breaks the next process.
 
 **Step 5: Register the provider client**
 

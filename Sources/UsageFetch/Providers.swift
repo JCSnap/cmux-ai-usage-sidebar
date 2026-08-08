@@ -113,7 +113,8 @@ struct CodexClient: UsageProviderClient {
 
 // MARK: - Grok
 
-struct GrokCredential {
+struct GrokCredential: Sendable {
+    let storageKey: String
     let accessToken: String
     let refreshToken: String?
     let expiresAt: Date?
@@ -122,30 +123,51 @@ struct GrokCredential {
     let clientID: String?
 }
 
+struct GrokRefresh: Sendable {
+    let accessToken: String
+    let refreshToken: String?
+    let expiresIn: TimeInterval?
+}
+
 /// Credential: plain file `$GROK_HOME/auth.json`. The root is keyed by issuer
 /// and client ID, with one OAuth session object beneath each key.
 struct GrokClient: UsageProviderClient {
+    private static let issuer = "https://auth.x.ai"
+
     func fetch(_ account: AccountConfig) async throws -> ProviderReading {
         let home = (account.grokHome ?? "~/.grok").expandedPath
         let url = URL(fileURLWithPath: home).appendingPathComponent("auth.json")
-        guard let data = try? Data(contentsOf: url),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let credential = Self.credential(in: root)
-        else { throw FetchError.noCredential }
+        let credential = try Self.credential(at: url)
+        return try await Self.fetch(
+            credential: credential, now: Date(),
+            send: { try await Http.response($0) },
+            persist: { refresh in
+                try Self.persist(refresh: refresh, credential: credential, at: url, now: Date())
+            })
+    }
 
+    static func fetch(
+        credential: GrokCredential,
+        now: Date,
+        send: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse),
+        persist: @Sendable (GrokRefresh) throws -> Void = { _ in }
+    ) async throws -> ProviderReading {
         var accessToken = credential.accessToken
         var didRefresh = false
-        if credential.expiresAt.map({ $0 <= Date() }) == true {
-            accessToken = try await Self.refresh(credential)
+        if credential.expiresAt.map({ $0 <= now.addingTimeInterval(300) }) == true {
+            let refreshed = try await Self.refresh(credential, send: send)
+            try persist(refreshed)
+            accessToken = refreshed.accessToken
             didRefresh = true
         }
 
-        var (billingData, response) = try await Http.response(
+        var (billingData, response) = try await send(
             Self.billingRequest(accessToken: accessToken))
         if response.statusCode == 401, !didRefresh {
-            accessToken = try await Self.refresh(credential)
-            didRefresh = true
-            (billingData, response) = try await Http.response(
+            let refreshed = try await Self.refresh(credential, send: send)
+            try persist(refreshed)
+            accessToken = refreshed.accessToken
+            (billingData, response) = try await send(
                 Self.billingRequest(accessToken: accessToken))
         }
         guard (200..<300).contains(response.statusCode) else {
@@ -176,24 +198,39 @@ struct GrokClient: UsageProviderClient {
             ])
     }
 
-    private static func refresh(_ credential: GrokCredential) async throws -> String {
+    private static func refresh(
+        _ credential: GrokCredential,
+        send: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
+    ) async throws -> GrokRefresh {
         guard let refreshToken = credential.refreshToken, !refreshToken.isEmpty,
               let clientID = credential.clientID, !clientID.isEmpty
         else { throw FetchError.noCredential }
-        let payload = try await Http.json(
+        let (data, response) = try await send(
             refreshRequest(refreshToken: refreshToken, clientID: clientID))
+        guard (200..<300).contains(response.statusCode) else {
+            throw FetchError.badStatus(
+                response.statusCode, String(decoding: data, as: UTF8.self))
+        }
+        guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw FetchError.badPayload("token refresh returned invalid JSON")
+        }
         guard let accessToken = payload.string("access_token"), !accessToken.isEmpty else {
             throw FetchError.badPayload("token refresh returned no access_token")
         }
-        return accessToken
+        return GrokRefresh(
+            accessToken: accessToken,
+            refreshToken: payload.string("refresh_token"),
+            expiresIn: payload.double("expires_in"))
     }
 
     static func credential(in root: [String: Any]) -> GrokCredential? {
         for key in root.keys.sorted() {
             guard let entry = root.dict(key),
+                  entry.string("oidc_issuer") == issuer,
                   let accessToken = entry.string("key"), !accessToken.isEmpty
             else { continue }
             return GrokCredential(
+                storageKey: key,
                 accessToken: accessToken,
                 refreshToken: entry.string("refresh_token"),
                 expiresAt: entry.string("expires_at").flatMap(Date.fromISO8601),
@@ -202,6 +239,61 @@ struct GrokClient: UsageProviderClient {
                 clientID: entry.string("oidc_client_id"))
         }
         return nil
+    }
+
+    static func credential(at url: URL) throws -> GrokCredential {
+        guard let data = try? Data(contentsOf: url) else { throw FetchError.noCredential }
+        let object: Any
+        do {
+            object = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw FetchError.badPayload("Grok auth.json is invalid JSON")
+        }
+        guard let root = object as? [String: Any] else {
+            throw FetchError.badPayload("Grok auth.json is not a JSON object")
+        }
+        guard let credential = credential(in: root) else { throw FetchError.noCredential }
+        return credential
+    }
+
+    /// Grok's OIDC server rotates refresh tokens. Preserve the fresh session in
+    /// Grok's own entry so both the CLI and future daemon processes can use it.
+    /// Re-read before writing to avoid replacing unrelated fields or a newer
+    /// credential written concurrently by Grok itself.
+    static func persist(
+        refresh: GrokRefresh,
+        credential: GrokCredential,
+        at url: URL,
+        now: Date
+    ) throws {
+        let data = try Data(contentsOf: url)
+        guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var entry = root[credential.storageKey] as? [String: Any]
+        else { throw FetchError.badPayload("Grok auth.json changed shape during refresh") }
+
+        if let storedRefresh = entry.string("refresh_token"),
+           storedRefresh != credential.refreshToken {
+            // Grok refreshed the same entry after we read it. Its value is
+            // newer, so do not overwrite it with this response.
+            return
+        }
+
+        entry["key"] = refresh.accessToken
+        if let refreshToken = refresh.refreshToken, !refreshToken.isEmpty {
+            entry["refresh_token"] = refreshToken
+        }
+        if let expiresIn = refresh.expiresIn {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            entry["expires_at"] = formatter.string(from: now.addingTimeInterval(expiresIn))
+        }
+        root[credential.storageKey] = entry
+
+        let updated = try JSONSerialization.data(
+            withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+        try updated.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     static func reading(from payload: [String: Any], email: String?) throws -> ProviderReading {

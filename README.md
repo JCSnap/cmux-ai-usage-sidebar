@@ -154,12 +154,15 @@ no credential in it is invisible to discovery. Then restart the daemon:
 launchctl kickstart -k "gui/$UID/dev.jcsnap.aiusaged"
 ```
 
-The file wins once it exists. A later scan never overwrites your names.
+The file wins once it exists. A later scan never overwrites your names. A
+versioned migration may append a newly supported provider once; this is how
+existing installs gain Grok without replacing their customized accounts.
 
 The file lists one entry per account:
 
 ```json
 {
+  "configVersion": 1,
   "port": 47823,
   "refreshSeconds": 300,
   "accounts": [
@@ -228,6 +231,9 @@ documented. Each one can change without notice.
 
 Two behaviours are easy to misdiagnose:
 
+- Grok's OAuth refresh can rotate the refresh token. The daemon atomically
+  updates only Grok's matching entry in `auth.json`, preserving its other
+  profile fields and owner-only file permissions.
 - The Antigravity endpoint answers `403 PERMISSION_DENIED` unless the
   `User-Agent` names the antigravity client. That is client sniffing, not a
   missing OAuth scope.

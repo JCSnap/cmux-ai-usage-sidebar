@@ -35,11 +35,20 @@ public struct AccountConfig: Codable, Sendable {
 }
 
 public struct Config: Codable, Sendable {
+    public static let currentVersion = 1
+
+    public var configVersion: Int?
     public var port: UInt16
     public var refreshSeconds: Int
     public var accounts: [AccountConfig]
 
-    public init(port: UInt16 = 47823, refreshSeconds: Int = 300, accounts: [AccountConfig]) {
+    public init(
+        configVersion: Int? = currentVersion,
+        port: UInt16 = 47823,
+        refreshSeconds: Int = 300,
+        accounts: [AccountConfig]
+    ) {
+        self.configVersion = configVersion
         self.port = port
         self.refreshSeconds = refreshSeconds
         self.accounts = accounts
@@ -57,23 +66,59 @@ public struct Config: Codable, Sendable {
     /// Reads the config file. Writes a discovered one first if none exists.
     ///
     /// The file wins once it exists, so a name or an account the user edited in
-    /// is never overwritten by a later scan.
+    /// is never overwritten by a later scan. Versioned migrations may append a
+    /// newly supported provider once, without changing existing entries.
     public static func load() throws -> Config {
         let url = URL(fileURLWithPath: path)
         if !FileManager.default.fileExists(atPath: path) {
             let config = discovered()
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try config.encoded().write(to: url)
+            try config.encoded().write(to: url, options: .atomic)
             return config
         }
-        return try JSONDecoder().decode(Config.self, from: Data(contentsOf: url))
+        var config = try JSONDecoder().decode(Config.self, from: Data(contentsOf: url))
+        if config.migrateIfNeeded(discovered: Discovery.accounts()) {
+            try config.encoded().write(to: url, options: .atomic)
+        }
+        return config
     }
 
     public func encoded() throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         return try encoder.encode(self)
+    }
+
+    /// Existing configs predate Grok and intentionally win over discovery.
+    /// Apply only this versioned provider addition once, preserving every
+    /// existing account name and store choice.
+    @discardableResult
+    mutating func migrateIfNeeded(discovered: [AccountConfig]) -> Bool {
+        guard (configVersion ?? 0) < Self.currentVersion else { return false }
+
+        var ids = Set(accounts.map(\.id))
+        for candidate in discovered where candidate.provider == .grok {
+            let alreadyConfigured = accounts.contains {
+                $0.provider == .grok && $0.grokHome == candidate.grokHome
+            }
+            guard !alreadyConfigured else { continue }
+
+            var id = candidate.id
+            var suffix = 2
+            while ids.contains(id) {
+                id = "\(candidate.id)-\(suffix)"
+                suffix += 1
+            }
+            ids.insert(id)
+            accounts.append(AccountConfig(
+                id: id,
+                provider: .grok,
+                displayName: id,
+                grokHome: candidate.grokHome))
+        }
+        configVersion = Self.currentVersion
+        return true
     }
 }
 

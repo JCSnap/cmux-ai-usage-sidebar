@@ -404,6 +404,20 @@ private final class GrokLockReplacementHook: @unchecked Sendable {
     #expect(decoded.accounts[2].state == .signedOut)
 }
 
+@Test func snapshotStoreStartsWithACompletedCollection() async throws {
+    let initial = UsageSnapshot(
+        generatedAt: Date(timeIntervalSince1970: 1_785_575_910),
+        accounts: [UsageAccount(
+            id: "grok", provider: .grok, displayName: "grok", state: .ok,
+            windows: [UsageWindow(label: "7d", usedFraction: 1)])])
+
+    let store = SnapshotStore(initial: initial)
+    let decoded = try UsageSnapshot.decoder().decode(
+        UsageSnapshot.self, from: await store.body())
+
+    #expect(decoded == initial)
+}
+
 @Test func keychainDumpYieldsEveryClaudeProfile() {
     // A trimmed `security dump-keychain` listing. Each item prints one
     // attribute per line, and unrelated items share the same shape.

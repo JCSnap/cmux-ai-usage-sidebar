@@ -3,23 +3,6 @@ import Network
 import UsageFetch
 import UsageModels
 
-/// Holds the most recent snapshot. The refresh loop writes it; every HTTP
-/// connection reads it, so no request ever waits on a provider call.
-actor SnapshotStore {
-    private var snapshot = UsageSnapshot.empty
-    // A valid empty snapshot, not a bare "{}". The sidebar decodes every reply,
-    // so a placeholder it cannot decode reads as "daemon unreachable" during
-    // the seconds before the first fetch lands.
-    private var encoded = (try? UsageSnapshot.encoder().encode(UsageSnapshot.empty)) ?? Data()
-
-    func update(_ new: UsageSnapshot) {
-        snapshot = new
-        encoded = (try? UsageSnapshot.encoder().encode(new)) ?? encoded
-    }
-
-    func body() -> Data { encoded }
-}
-
 /// Minimal HTTP/1.1 responder bound to loopback.
 ///
 /// The cmux sidebar extension is sandboxed, so it cannot read the credential
@@ -102,7 +85,9 @@ if arguments.contains("--once") {
     exit(0)
 }
 
-let store = SnapshotStore()
+// Complete the first provider refresh before opening the port. Otherwise the
+// installer and sidebar can observe and cache a placeholder empty snapshot.
+let store = SnapshotStore(initial: await collector.collect(config))
 let server = try UsageServer(port: config.port, store: store)
 server.start()
 FileHandle.standardError.write(Data(

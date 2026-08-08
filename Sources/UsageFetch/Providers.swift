@@ -1,5 +1,9 @@
 import Foundation
+import Darwin
 import UsageModels
+
+@_silgen_name("flock")
+private func systemFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
 
 /// What one provider read yields. A struct rather than a tuple so each client
 /// can omit the fields its API does not return.
@@ -129,6 +133,47 @@ struct GrokRefresh: Sendable {
     let expiresIn: TimeInterval?
 }
 
+/// Coordinates with Grok CLI's own advisory lock so a rotating refresh token
+/// is consumed and replaced by only one process at a time.
+final class GrokAuthFileLock: @unchecked Sendable {
+    private var descriptor: Int32
+
+    private init(descriptor: Int32) { self.descriptor = descriptor }
+
+    static func acquire(for authURL: URL) async throws -> GrokAuthFileLock {
+        let lockURL = URL(fileURLWithPath: authURL.path + ".lock")
+        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else {
+            throw FetchError.badPayload("cannot open Grok auth lock")
+        }
+
+        do {
+            for _ in 0..<100 {
+                if systemFlock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+                    return GrokAuthFileLock(descriptor: descriptor)
+                }
+                guard errno == EWOULDBLOCK || errno == EAGAIN else {
+                    throw FetchError.badPayload("cannot acquire Grok auth lock")
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            throw FetchError.badPayload("timed out waiting for Grok auth lock")
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
+    }
+
+    func release() {
+        guard descriptor >= 0 else { return }
+        _ = systemFlock(descriptor, LOCK_UN)
+        Darwin.close(descriptor)
+        descriptor = -1
+    }
+
+    deinit { release() }
+}
+
 /// Credential: plain file `$GROK_HOME/auth.json`. The root is keyed by issuer
 /// and client ID, with one OAuth session object beneath each key.
 struct GrokClient: UsageProviderClient {
@@ -137,12 +182,22 @@ struct GrokClient: UsageProviderClient {
     func fetch(_ account: AccountConfig) async throws -> ProviderReading {
         let home = (account.grokHome ?? "~/.grok").expandedPath
         let url = URL(fileURLWithPath: home).appendingPathComponent("auth.json")
+        return try await Self.fetch(
+            at: url, now: Date(), send: { try await Http.response($0) })
+    }
+
+    static func fetch(
+        at url: URL,
+        now: Date,
+        send: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
+    ) async throws -> ProviderReading {
+        let lock = try await GrokAuthFileLock.acquire(for: url)
+        defer { lock.release() }
         let credential = try Self.credential(at: url)
         return try await Self.fetch(
-            credential: credential, now: Date(),
-            send: { try await Http.response($0) },
+            credential: credential, now: now, send: send,
             persist: { refresh in
-                try Self.persist(refresh: refresh, credential: credential, at: url, now: Date())
+                try Self.persist(refresh: refresh, credential: credential, at: url, now: now)
             })
     }
 
@@ -171,8 +226,7 @@ struct GrokClient: UsageProviderClient {
                 Self.billingRequest(accessToken: accessToken))
         }
         guard (200..<300).contains(response.statusCode) else {
-            throw FetchError.badStatus(
-                response.statusCode, String(decoding: billingData, as: UTF8.self))
+            throw FetchError.badStatus(response.statusCode, "Grok billing request failed")
         }
         guard let payload = try JSONSerialization.jsonObject(with: billingData) as? [String: Any]
         else { throw FetchError.badPayload("not a JSON object") }
@@ -208,8 +262,7 @@ struct GrokClient: UsageProviderClient {
         let (data, response) = try await send(
             refreshRequest(refreshToken: refreshToken, clientID: clientID))
         guard (200..<300).contains(response.statusCode) else {
-            throw FetchError.badStatus(
-                response.statusCode, String(decoding: data, as: UTF8.self))
+            throw FetchError.badStatus(response.statusCode, "Grok token refresh failed")
         }
         guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw FetchError.badPayload("token refresh returned invalid JSON")
@@ -242,7 +295,15 @@ struct GrokClient: UsageProviderClient {
     }
 
     static func credential(at url: URL) throws -> GrokCredential {
-        guard let data = try? Data(contentsOf: url) else { throw FetchError.noCredential }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw FetchError.noCredential
+        }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw FetchError.badPayload("cannot read Grok auth.json")
+        }
         let object: Any
         do {
             object = try JSONSerialization.jsonObject(with: data)

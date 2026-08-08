@@ -78,8 +78,10 @@ public struct Config: Codable, Sendable {
             return config
         }
         var config = try JSONDecoder().decode(Config.self, from: Data(contentsOf: url))
-        if config.migrateIfNeeded(discovered: Discovery.accounts()) {
-            try config.encoded().write(to: url, options: .atomic)
+        if (config.configVersion ?? 0) < Self.currentVersion {
+            if config.migrateIfNeeded(discovered: Discovery.accounts()) {
+                try config.encoded().write(to: url, options: .atomic)
+            }
         }
         return config
     }

@@ -40,6 +40,8 @@ client ID, using the refresh-token grant at
 `https://auth.x.ai/oauth2/token`. Because xAI rotates refresh tokens, a
 successful refresh is written atomically into the same issuer entry in
 Grok-owned `auth.json`, preserving unrelated fields and owner-only permissions.
+Refresh and persistence hold Grok's adjacent `auth.json.lock` advisory lock so
+another CLI or daemon process cannot consume or overwrite the rotating session.
 A 401 from the billing endpoint gets one refresh-and-retry attempt so
 clock skew and server-side invalidation recover without user action.
 

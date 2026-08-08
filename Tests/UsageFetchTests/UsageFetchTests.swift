@@ -271,6 +271,39 @@ private func grokCredential(expiresAt: Date?) -> GrokCredential {
     #expect(await stub.recordedRequests().count == 3)
 }
 
+@Test func duplicateGrokAccountsShareTheAuthRefreshLock() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let auth = root.appendingPathComponent("auth.json")
+    let original: [String: Any] = ["https://auth.x.ai::client": [
+        "key": "expired-access",
+        "refresh_token": "old-refresh",
+        "expires_at": "2026-08-01T00:00:00Z",
+        "oidc_issuer": "https://auth.x.ai",
+        "oidc_client_id": "client",
+    ]]
+    try JSONSerialization.data(withJSONObject: original).write(to: auth)
+    let stub = GrokHTTPStub([
+        .init(status: 200, body: #"{"access_token":"fresh-access","refresh_token":"fresh-refresh","expires_in":3600}"#),
+        .init(status: 200, body: grokBillingFixture),
+        .init(status: 200, body: grokBillingFixture),
+    ])
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+
+    async let first = GrokClient.fetch(
+        at: auth, now: now, send: { try await stub.send($0) })
+    async let second = GrokClient.fetch(
+        at: auth, now: now, send: { try await stub.send($0) })
+    let readings = try await [first, second]
+
+    #expect(readings.allSatisfy { $0.windows[0].usedFraction == 0.42 })
+    let requests = await stub.recordedRequests()
+    #expect(requests.filter { $0.url?.path == "/oauth2/token" }.count == 1)
+    #expect(requests.filter { $0.url?.path == "/v1/billing" }.count == 2)
+}
+
 @Test func everyClientPairIsTriedBecauseTheBinaryHoldsMoreThanOne() {
     // Nothing in the binary layout says which id belongs to which secret, so
     // every combination has to be a candidate.

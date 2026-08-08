@@ -233,7 +233,9 @@ Two behaviours are easy to misdiagnose:
 
 - Grok's OAuth refresh can rotate the refresh token. The daemon atomically
   updates only Grok's matching entry in `auth.json`, preserving its other
-  profile fields and owner-only file permissions.
+  profile fields and owner-only file permissions. It shares Grok's adjacent
+  `auth.json.lock`, so concurrent CLI and daemon refreshes cannot overwrite one
+  another.
 - The Antigravity endpoint answers `403 PERMISSION_DENIED` unless the
   `User-Agent` names the antigravity client. That is client sniffing, not a
   missing OAuth scope.

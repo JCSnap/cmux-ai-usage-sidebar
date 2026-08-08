@@ -304,6 +304,37 @@ private func grokCredential(expiresAt: Date?) -> GrokCredential {
     #expect(requests.filter { $0.url?.path == "/v1/billing" }.count == 2)
 }
 
+private final class GrokLockReplacementHook: @unchecked Sendable {
+    private let stateLock = NSLock()
+    private var didReplace = false
+
+    func replaceOnce(_ lockURL: URL) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard !didReplace else { return }
+        didReplace = true
+        try? FileManager.default.removeItem(at: lockURL)
+        try? Data("stale-holder".utf8).write(to: lockURL)
+    }
+}
+
+@Test func grokAuthLockRetriesWhenTheCLIReplacesItsInode() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let auth = root.appendingPathComponent("auth.json")
+    try Data("{}".utf8).write(to: auth)
+    let hook = GrokLockReplacementHook()
+
+    let lock = try await GrokAuthFileLock.acquire(for: auth, onOpened: hook.replaceOnce)
+    defer { lock.release() }
+
+    #expect(lock.descriptorMatchesPath())
+    let holder = try String(contentsOf: auth.appendingPathExtension("lock"), encoding: .utf8)
+    #expect(holder.split(separator: ":").first == Substring(String(getpid())))
+}
+
 @Test func everyClientPairIsTriedBecauseTheBinaryHoldsMoreThanOne() {
     // Nothing in the binary layout says which id belongs to which secret, so
     // every combination has to be a candidate.

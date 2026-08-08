@@ -136,35 +136,99 @@ struct GrokRefresh: Sendable {
 /// Coordinates with Grok CLI's own advisory lock so a rotating refresh token
 /// is consumed and replaced by only one process at a time.
 final class GrokAuthFileLock: @unchecked Sendable {
+    private let lockURL: URL
+    private let stateLock = NSLock()
     private var descriptor: Int32
+    private var heartbeat: Task<Void, Never>?
 
-    private init(descriptor: Int32) { self.descriptor = descriptor }
+    private init(descriptor: Int32, lockURL: URL) {
+        self.descriptor = descriptor
+        self.lockURL = lockURL
+    }
 
-    static func acquire(for authURL: URL) async throws -> GrokAuthFileLock {
+    static func acquire(
+        for authURL: URL,
+        onOpened: (@Sendable (URL) -> Void)? = nil
+    ) async throws -> GrokAuthFileLock {
         let lockURL = URL(fileURLWithPath: authURL.path + ".lock")
-        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
-        guard descriptor >= 0 else {
-            throw FetchError.badPayload("cannot open Grok auth lock")
-        }
+        for _ in 0..<100 {
+            let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+            guard descriptor >= 0 else {
+                throw FetchError.badPayload("cannot open Grok auth lock")
+            }
+            onOpened?(lockURL)
 
-        do {
-            for _ in 0..<100 {
-                if systemFlock(descriptor, LOCK_EX | LOCK_NB) == 0 {
-                    return GrokAuthFileLock(descriptor: descriptor)
+            if systemFlock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+                let lock = GrokAuthFileLock(descriptor: descriptor, lockURL: lockURL)
+                if lock.refreshHolderAndValidate() {
+                    lock.startHeartbeat()
+                    return lock
                 }
-                guard errno == EWOULDBLOCK || errno == EAGAIN else {
+                lock.release()
+            } else {
+                let lockError = errno
+                Darwin.close(descriptor)
+                guard lockError == EWOULDBLOCK || lockError == EAGAIN else {
                     throw FetchError.badPayload("cannot acquire Grok auth lock")
                 }
-                try await Task.sleep(for: .milliseconds(50))
             }
-            throw FetchError.badPayload("timed out waiting for Grok auth lock")
-        } catch {
-            Darwin.close(descriptor)
-            throw error
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        throw FetchError.badPayload("timed out waiting for Grok auth lock")
+    }
+
+    /// Updates the same PID:EPOCH holder record Grok uses, then verifies the
+    /// locked descriptor is still the inode named by the lock path. Grok may
+    /// unlink a stale lock while another process is opening it; that process
+    /// must retry rather than continue holding an orphaned inode.
+    func refreshHolderAndValidate() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard descriptor >= 0, descriptorMatchesPathLocked() else { return false }
+
+        let holder = Data("\(getpid()):\(Int(Date().timeIntervalSince1970))".utf8)
+        let wroteAll = holder.withUnsafeBytes { bytes in
+            Darwin.pwrite(descriptor, bytes.baseAddress, bytes.count, 0) == bytes.count
+        }
+        guard wroteAll, Darwin.ftruncate(descriptor, off_t(holder.count)) == 0 else {
+            return false
+        }
+        _ = Darwin.fsync(descriptor)
+        return descriptorMatchesPathLocked()
+    }
+
+    func descriptorMatchesPath() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return descriptorMatchesPathLocked()
+    }
+
+    private func descriptorMatchesPathLocked() -> Bool {
+        guard descriptor >= 0 else { return false }
+        var descriptorInfo = Darwin.stat()
+        var pathInfo = Darwin.stat()
+        guard Darwin.fstat(descriptor, &descriptorInfo) == 0,
+              Darwin.lstat(lockURL.path, &pathInfo) == 0
+        else { return false }
+        return descriptorInfo.st_dev == pathInfo.st_dev
+            && descriptorInfo.st_ino == pathInfo.st_ino
+    }
+
+    private func startHeartbeat() {
+        heartbeat = Task.detached { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self else { return }
+                _ = self.refreshHolderAndValidate()
+            }
         }
     }
 
     func release() {
+        heartbeat?.cancel()
+        heartbeat = nil
+        stateLock.lock()
+        defer { stateLock.unlock() }
         guard descriptor >= 0 else { return }
         _ = systemFlock(descriptor, LOCK_UN)
         Darwin.close(descriptor)
@@ -197,6 +261,9 @@ struct GrokClient: UsageProviderClient {
         return try await Self.fetch(
             credential: credential, now: now, send: send,
             persist: { refresh in
+                guard lock.refreshHolderAndValidate() else {
+                    throw FetchError.badPayload("Grok auth lock changed during refresh")
+                }
                 try Self.persist(refresh: refresh, credential: credential, at: url, now: now)
             })
     }

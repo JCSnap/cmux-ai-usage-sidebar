@@ -297,12 +297,36 @@ struct GrokClient: UsageProviderClient {
         }
         guard let payload = try JSONSerialization.jsonObject(with: billingData) as? [String: Any]
         else { throw FetchError.badPayload("not a JSON object") }
-        return try Self.reading(from: payload, email: credential.email)
+        if payload.dict("config")?.double("creditUsagePercent") != nil {
+            return try Self.reading(from: payload, email: credential.email)
+        }
+
+        // Unified-billing accounts get a credits payload without
+        // creditUsagePercent. The plain endpoint still reports their token
+        // counts, so read the percentage from used / monthlyLimit instead.
+        let (tokenData, tokenResponse) = try await send(
+            Self.tokenBillingRequest(accessToken: accessToken))
+        guard (200..<300).contains(tokenResponse.statusCode) else {
+            throw FetchError.badStatus(
+                tokenResponse.statusCode, "Grok token billing request failed")
+        }
+        guard let tokenPayload = try JSONSerialization.jsonObject(with: tokenData) as? [String: Any]
+        else { throw FetchError.badPayload("not a JSON object") }
+        return try Self.tokenReading(from: tokenPayload, email: credential.email)
     }
 
     static func billingRequest(accessToken: String) -> URLRequest {
         Http.get(
             "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+            headers: [
+                "Authorization": "Bearer \(accessToken)",
+                "Accept": "application/json",
+            ])
+    }
+
+    static func tokenBillingRequest(accessToken: String) -> URLRequest {
+        Http.get(
+            "https://cli-chat-proxy.grok.com/v1/billing",
             headers: [
                 "Authorization": "Bearer \(accessToken)",
                 "Accept": "application/json",
@@ -445,6 +469,32 @@ struct GrokClient: UsageProviderClient {
             windows: [UsageWindow(
                 label: label,
                 usedFraction: max(0, min(100, usedPercent)) / 100,
+                resetsAt: resetsAt)])
+    }
+
+    /// Fallback shape from the plain billing endpoint. Unified-billing
+    /// accounts report token counts and a monthly billing period here.
+    static func tokenReading(from payload: [String: Any], email: String?) throws -> ProviderReading {
+        guard let config = payload.dict("config"),
+              let used = config.dict("used")?.double("val"),
+              let limit = config.dict("monthlyLimit")?.double("val"), limit > 0
+        else { throw FetchError.badPayload("no creditUsagePercent") }
+
+        let startsAt = config.string("billingPeriodStart").flatMap(Date.fromISO8601)
+        let resetsAt = config.string("billingPeriodEnd").flatMap(Date.fromISO8601)
+        let label: String
+        if let startsAt, let resetsAt, resetsAt > startsAt {
+            label = CodexClient.label(
+                forWindowSeconds: Int(resetsAt.timeIntervalSince(startsAt).rounded()))
+        } else {
+            label = "—"
+        }
+
+        return ProviderReading(
+            email: email,
+            windows: [UsageWindow(
+                label: label,
+                usedFraction: max(0, min(1, used / limit)),
                 resetsAt: resetsAt)])
     }
 }

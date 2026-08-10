@@ -152,6 +152,39 @@ import UsageModels
     }
 }
 
+@Test func grokTokenBillingConvertsCountsToAFraction() throws {
+    let payload: [String: Any] = ["config": [
+        "monthlyLimit": ["val": 15_000.0],
+        "used": ["val": 4_829.0],
+        "billingPeriodStart": "2026-08-01T00:00:00+00:00",
+        "billingPeriodEnd": "2026-09-01T00:00:00+00:00",
+    ]]
+
+    let reading = try GrokClient.tokenReading(from: payload, email: "person@example.com")
+    #expect(reading.email == "person@example.com")
+    #expect(reading.windows.count == 1)
+    #expect(reading.windows[0].label == "31d")
+    #expect(abs(reading.windows[0].usedFraction - 4_829.0 / 15_000.0) < 0.0001)
+    #expect(reading.windows[0].resetsAt != nil)
+}
+
+@Test func grokTokenBillingClampsOverageAndRequiresALimit() throws {
+    let over: [String: Any] = ["config": [
+        "monthlyLimit": ["val": 100.0], "used": ["val": 250.0],
+    ]]
+    let reading = try GrokClient.tokenReading(from: over, email: nil)
+    #expect(reading.windows[0].usedFraction == 1)
+    #expect(reading.windows[0].label == "—")
+
+    #expect(throws: FetchError.self) {
+        try GrokClient.tokenReading(from: ["config": ["used": ["val": 5.0]]], email: nil)
+    }
+    #expect(throws: FetchError.self) {
+        try GrokClient.tokenReading(
+            from: ["config": ["monthlyLimit": ["val": 0.0], "used": ["val": 5.0]]], email: nil)
+    }
+}
+
 @Test func grokRequestTargetsTheCreditsEndpoint() {
     let request = GrokClient.billingRequest(accessToken: "access")
     #expect(request.url?.absoluteString
@@ -224,6 +257,36 @@ private func grokCredential(expiresAt: Date?) -> GrokCredential {
     let requests = await stub.recordedRequests()
     #expect(requests.map { $0.url?.path } == ["/oauth2/token", "/v1/billing"])
     #expect(requests[1].value(forHTTPHeaderField: "Authorization") == "Bearer fresh-access")
+}
+
+@Test func unifiedBillingFallsBackToTheTokenEndpoint() async throws {
+    // A unified-billing account: the credits payload has a period but no
+    // creditUsagePercent, so the client re-asks the plain endpoint.
+    let stub = GrokHTTPStub([
+        .init(status: 200, body: """
+            {"config":{"currentPeriod":{"start":"2026-08-08T19:17:43Z",
+            "end":"2026-08-15T19:17:43Z"},"isUnifiedBillingUser":true}}
+            """),
+        .init(status: 200, body: """
+            {"config":{"monthlyLimit":{"val":15000},"used":{"val":4829},
+            "billingPeriodStart":"2026-08-01T00:00:00+00:00",
+            "billingPeriodEnd":"2026-09-01T00:00:00+00:00"}}
+            """),
+    ])
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+
+    let reading = try await GrokClient.fetch(
+        credential: grokCredential(expiresAt: now.addingTimeInterval(3_600)), now: now,
+        send: { try await stub.send($0) })
+
+    #expect(abs(reading.windows[0].usedFraction - 4_829.0 / 15_000.0) < 0.0001)
+    #expect(reading.windows[0].label == "31d")
+    let requests = await stub.recordedRequests()
+    #expect(requests.map { $0.url?.absoluteString } == [
+        "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+        "https://cli-chat-proxy.grok.com/v1/billing",
+    ])
+    #expect(requests[1].value(forHTTPHeaderField: "Authorization") == "Bearer stored-access")
 }
 
 @Test func grokBilling401RefreshesAndRetriesExactlyOnce() async throws {

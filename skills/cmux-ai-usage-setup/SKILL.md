@@ -168,7 +168,7 @@ above the usage section, with a divider they can drag.
 | AI Usage listed two or three times | Launch Services registered the build copies as well as the installed app | Run `./scripts/install-app.sh` again; it unregisters the stale copies |
 | Sidebar says the daemon is unreachable | The LaunchAgent is not running, or another process holds the port | Read `~/Library/Logs/ai-usage/aiusaged.log`; run `lsof -i :47823` |
 | An account shows `error` with HTTP 403 on Antigravity | Something changed the `User-Agent` | The endpoint sniffs the client; it is not a missing OAuth scope |
-| An account shows `error` with HTTP 401 | The stored token is dead | Log in again with that agent's own CLI, then restart the daemon |
+| An account shows `error` with HTTP 401 | The stored token is dead, or Codex/Grok refresh failed | Log in again with that agent's own CLI, then restart the daemon |
 | An account shows `signedOut` but the user is logged in | The config points at the wrong store | Re-run `aiusaged --discover` and compare the field for that provider |
 | Nothing appears after enabling the extension | cmux is older than 0.64.20 | Update cmux |
 

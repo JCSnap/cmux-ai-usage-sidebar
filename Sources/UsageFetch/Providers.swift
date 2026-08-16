@@ -60,26 +60,224 @@ struct ClaudeClient: UsageProviderClient {
 
 // MARK: - Codex
 
+struct CodexCredential: Sendable {
+    let accessToken: String
+    let refreshToken: String?
+    let accountID: String?
+    let lastRefresh: Date?
+
+    init(
+        accessToken: String,
+        refreshToken: String? = nil,
+        accountID: String? = nil,
+        lastRefresh: Date? = nil
+    ) {
+        self.accessToken = accessToken
+        self.refreshToken = refreshToken
+        self.accountID = accountID
+        self.lastRefresh = lastRefresh
+    }
+}
+
+struct CodexRefresh: Sendable {
+    let accessToken: String
+    let refreshToken: String?
+    let idToken: String?
+
+    init(accessToken: String, refreshToken: String? = nil, idToken: String? = nil) {
+        self.accessToken = accessToken
+        self.refreshToken = refreshToken
+        self.idToken = idToken
+    }
+}
+
 /// Credential: plain file `$CODEX_HOME/auth.json`. No keychain involved, which
 /// is why `CODEX_HOME` alone is enough to separate the two accounts.
+///
+/// ChatGPT access tokens last about ten days. Codex CLI refreshes them through
+/// `auth.openai.com` and rotates the refresh token, so this client does the
+/// same and writes the new session back before the next CLI process reads it.
 struct CodexClient: UsageProviderClient {
+    static let clientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+    private static let refreshSkew: TimeInterval = 5 * 60
+    private static let lastRefreshLimit: TimeInterval = 8 * 24 * 60 * 60
+
     func fetch(_ account: AccountConfig) async throws -> ProviderReading {
         let home = (account.codexHome ?? "~/.codex").expandedPath
         let url = URL(fileURLWithPath: home).appendingPathComponent("auth.json")
-        guard let data = try? Data(contentsOf: url),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tokens = root.dict("tokens"),
-              let token = tokens.string("access_token"), !token.isEmpty
-        else { throw FetchError.noCredential }
+        return try await Self.fetch(
+            at: url, now: Date(), send: { try await Http.response($0) })
+    }
 
-        let payload = try await Http.json(Http.get(
+    static func fetch(
+        at url: URL,
+        now: Date,
+        send: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
+    ) async throws -> ProviderReading {
+        let credential = try credential(at: url)
+        return try await fetch(
+            credential: credential, now: now, send: send,
+            persist: { refresh in
+                try persist(refresh: refresh, credential: credential, at: url, now: now)
+            })
+    }
+
+    static func fetch(
+        credential: CodexCredential,
+        now: Date,
+        send: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse),
+        persist: @Sendable (CodexRefresh) throws -> Void = { _ in }
+    ) async throws -> ProviderReading {
+        var accessToken = credential.accessToken
+        var didRefresh = false
+        if needsRefresh(credential, now: now), hasRefreshToken(credential) {
+            let refreshed = try await refresh(credential, send: send)
+            try persist(refreshed)
+            accessToken = refreshed.accessToken
+            didRefresh = true
+        }
+
+        var (data, response) = try await send(
+            usageRequest(accessToken: accessToken, accountID: credential.accountID ?? ""))
+        if response.statusCode == 401, !didRefresh, hasRefreshToken(credential) {
+            let refreshed = try await refresh(credential, send: send)
+            try persist(refreshed)
+            accessToken = refreshed.accessToken
+            (data, response) = try await send(
+                usageRequest(accessToken: accessToken, accountID: credential.accountID ?? ""))
+        }
+        guard (200..<300).contains(response.statusCode) else {
+            throw FetchError.badStatus(response.statusCode, statusDetail(data))
+        }
+        guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw FetchError.badPayload("not a JSON object")
+        }
+        return try reading(from: payload)
+    }
+
+    static func usageRequest(accessToken: String, accountID: String) -> URLRequest {
+        Http.get(
             "https://chatgpt.com/backend-api/wham/usage",
             headers: [
-                "Authorization": "Bearer \(token)",
-                "chatgpt-account-id": tokens.string("account_id") ?? "",
+                "Authorization": "Bearer \(accessToken)",
+                "chatgpt-account-id": accountID,
                 "Accept": "application/json",
-            ]))
+            ])
+    }
 
+    static func refreshRequest(refreshToken: String) -> URLRequest {
+        Http.jsonPost(
+            "https://auth.openai.com/oauth/token",
+            object: [
+                "client_id": oauthClientID(),
+                "grant_type": "refresh_token",
+                "refresh_token": refreshToken,
+            ])
+    }
+
+    static func oauthClientID() -> String {
+        let override = ProcessInfo.processInfo.environment["CODEX_APP_SERVER_LOGIN_CLIENT_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let override, !override.isEmpty { return override }
+        return clientID
+    }
+
+    static func jwtExpiration(_ token: String) -> Date? {
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return nil }
+        var payload = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let pad = (4 - payload.count % 4) % 4
+        payload += String(repeating: "=", count: pad)
+        guard let data = Data(base64Encoded: payload),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let exp = object.double("exp")
+        else { return nil }
+        return Date(timeIntervalSince1970: exp)
+    }
+
+    static func needsRefresh(_ credential: CodexCredential, now: Date) -> Bool {
+        if let expiresAt = jwtExpiration(credential.accessToken) {
+            return expiresAt <= now.addingTimeInterval(refreshSkew)
+        }
+        guard let lastRefresh = credential.lastRefresh else { return false }
+        return lastRefresh < now.addingTimeInterval(-lastRefreshLimit)
+    }
+
+    static func credential(in root: [String: Any]) -> CodexCredential? {
+        guard let tokens = root.dict("tokens"),
+              let accessToken = tokens.string("access_token"), !accessToken.isEmpty
+        else { return nil }
+        return CodexCredential(
+            accessToken: accessToken,
+            refreshToken: tokens.string("refresh_token"),
+            accountID: tokens.string("account_id"),
+            lastRefresh: root.string("last_refresh").flatMap(Date.fromISO8601))
+    }
+
+    static func credential(at url: URL) throws -> CodexCredential {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw FetchError.noCredential
+        }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw FetchError.badPayload("cannot read Codex auth.json")
+        }
+        let object: Any
+        do {
+            object = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw FetchError.badPayload("Codex auth.json is invalid JSON")
+        }
+        guard let root = object as? [String: Any] else {
+            throw FetchError.badPayload("Codex auth.json is not a JSON object")
+        }
+        guard let credential = credential(in: root) else { throw FetchError.noCredential }
+        return credential
+    }
+
+    /// Codex rotates refresh tokens. Re-read before writing so a CLI refresh
+    /// that landed first is not overwritten with this process's older session.
+    static func persist(
+        refresh: CodexRefresh,
+        credential: CodexCredential,
+        at url: URL,
+        now: Date
+    ) throws {
+        let data = try Data(contentsOf: url)
+        guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var tokens = root["tokens"] as? [String: Any]
+        else { throw FetchError.badPayload("Codex auth.json changed shape during refresh") }
+
+        if let storedRefresh = tokens.string("refresh_token"),
+           storedRefresh != credential.refreshToken {
+            return
+        }
+
+        tokens["access_token"] = refresh.accessToken
+        if let refreshToken = refresh.refreshToken, !refreshToken.isEmpty {
+            tokens["refresh_token"] = refreshToken
+        }
+        if let idToken = refresh.idToken, !idToken.isEmpty {
+            tokens["id_token"] = idToken
+        }
+        root["tokens"] = tokens
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        root["last_refresh"] = formatter.string(from: now)
+
+        let updated = try JSONSerialization.data(
+            withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+        try updated.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    static func reading(from payload: [String: Any]) throws -> ProviderReading {
         guard let limit = payload.dict("rate_limit") else {
             throw FetchError.badPayload("no rate_limit")
         }
@@ -94,7 +292,7 @@ struct CodexClient: UsageProviderClient {
                 Date(timeIntervalSince1970: TimeInterval($0))
             }
             return UsageWindow(
-                label: Self.label(forWindowSeconds: seconds),
+                label: label(forWindowSeconds: seconds),
                 usedFraction: (block.double("used_percent") ?? 0) / 100,
                 resetsAt: resetsAt)
         }
@@ -112,6 +310,42 @@ struct CodexClient: UsageProviderClient {
         case ..<86_400: "\(seconds / 3600)h"
         default: "\(seconds / 86_400)d"
         }
+    }
+
+    private static func hasRefreshToken(_ credential: CodexCredential) -> Bool {
+        guard let refreshToken = credential.refreshToken else { return false }
+        return !refreshToken.isEmpty
+    }
+
+    private static func refresh(
+        _ credential: CodexCredential,
+        send: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
+    ) async throws -> CodexRefresh {
+        guard let refreshToken = credential.refreshToken, !refreshToken.isEmpty else {
+            throw FetchError.noCredential
+        }
+        let (data, response) = try await send(refreshRequest(refreshToken: refreshToken))
+        guard (200..<300).contains(response.statusCode) else {
+            throw FetchError.badStatus(response.statusCode, statusDetail(data))
+        }
+        guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw FetchError.badPayload("token refresh returned invalid JSON")
+        }
+        guard let accessToken = payload.string("access_token"), !accessToken.isEmpty else {
+            throw FetchError.badPayload("token refresh returned no access_token")
+        }
+        return CodexRefresh(
+            accessToken: accessToken,
+            refreshToken: payload.string("refresh_token"),
+            idToken: payload.string("id_token"))
+    }
+
+    private static func statusDetail(_ data: Data) -> String {
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let message = object.dict("error")?.string("message"), !message.isEmpty {
+            return message
+        }
+        return String(decoding: data, as: UTF8.self)
     }
 }
 

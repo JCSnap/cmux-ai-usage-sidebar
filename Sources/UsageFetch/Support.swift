@@ -101,6 +101,14 @@ enum Http {
         request.httpBody = Data(components.percentEncodedQuery?.utf8 ?? "".utf8)
         return request
     }
+
+    static func jsonPost(_ url: String, object: [String: Any]) -> URLRequest {
+        var request = URLRequest(url: URL(string: url)!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: object)
+        return request
+    }
 }
 
 extension Dictionary where Key == String, Value == Any {

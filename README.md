@@ -229,8 +229,14 @@ documented. Each one can change without notice.
 | Grok | `GET cli-chat-proxy.grok.com/v1/billing?format=credits` |
 | Antigravity | `POST cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` |
 
-Two behaviours are easy to misdiagnose:
+A few behaviours are easy to misdiagnose:
 
+- Codex ChatGPT access tokens last about ten days. The daemon refreshes them
+  through `https://auth.openai.com/oauth/token` with the same client id the CLI
+  uses, then writes the rotated tokens and `last_refresh` back into that
+  account's `auth.json`. A 401 from the usage endpoint gets one refresh-and-retry.
+  If Codex itself already rotated the refresh token, the daemon leaves the file
+  alone rather than overwriting a newer session.
 - Grok's OAuth refresh can rotate the refresh token. The daemon atomically
   updates only Grok's matching entry in `auth.json`, preserving its other
   profile fields and owner-only file permissions. It shares Grok's adjacent

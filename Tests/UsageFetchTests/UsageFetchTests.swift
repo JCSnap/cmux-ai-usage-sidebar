@@ -10,6 +10,198 @@ import UsageModels
     #expect(CodexClient.label(forWindowSeconds: 0) == "—")
 }
 
+private func unsignedJWT(exp: TimeInterval) -> String {
+    func encode(_ object: [String: Any]) -> String {
+        let data = try! JSONSerialization.data(withJSONObject: object)
+        return data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "="))
+    }
+    return "\(encode(["alg": "none"])).\(encode(["exp": Int(exp)])).sig"
+}
+
+private let codexUsageFixture = """
+{"plan_type":"plus","email":"person@example.com","rate_limit":{
+"primary_window":{"limit_window_seconds":604800,"used_percent":12,"reset_at":1787129987}}}
+"""
+
+private func codexCredential(accessToken: String, lastRefresh: Date? = nil) -> CodexCredential {
+    CodexCredential(
+        accessToken: accessToken, refreshToken: "codex-refresh",
+        accountID: "acct-1", lastRefresh: lastRefresh)
+}
+
+@Test func codexRefreshRequestPostsJsonToOpenAI() throws {
+    let request = CodexClient.refreshRequest(refreshToken: "codex-refresh")
+    #expect(request.url?.absoluteString == "https://auth.openai.com/oauth/token")
+    #expect(request.httpMethod == "POST")
+    #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
+
+    let body = try JSONSerialization.jsonObject(with: #require(request.httpBody)) as? [String: Any]
+    #expect(body?["grant_type"] as? String == "refresh_token")
+    #expect(body?["refresh_token"] as? String == "codex-refresh")
+    #expect(body?["client_id"] as? String == "app_EMoamEEZ73f0CkXaXp7hrann")
+}
+
+@Test func codexJwtExpirationReadsTheExpClaim() {
+    let exp = Date(timeIntervalSince1970: 1_786_879_792)
+    #expect(CodexClient.jwtExpiration(unsignedJWT(exp: exp.timeIntervalSince1970)) == exp)
+    #expect(CodexClient.jwtExpiration("not-a-jwt") == nil)
+}
+
+@Test func expiredCodexJwtNeedsRefreshFiveMinutesBeforeExpiry() {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let expiring = unsignedJWT(exp: now.addingTimeInterval(4 * 60).timeIntervalSince1970)
+    let fresh = unsignedJWT(exp: now.addingTimeInterval(10 * 60).timeIntervalSince1970)
+    #expect(CodexClient.needsRefresh(codexCredential(accessToken: expiring), now: now))
+    #expect(!CodexClient.needsRefresh(codexCredential(accessToken: fresh), now: now))
+}
+
+@Test func staleCodexLastRefreshNeedsRefreshWhenJwtHasNoExp() {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let stale = now.addingTimeInterval(-9 * 24 * 60 * 60)
+    let recent = now.addingTimeInterval(-2 * 24 * 60 * 60)
+    #expect(CodexClient.needsRefresh(
+        CodexCredential(accessToken: "opaque", refreshToken: "r", lastRefresh: stale), now: now))
+    #expect(!CodexClient.needsRefresh(
+        CodexCredential(accessToken: "opaque", refreshToken: "r", lastRefresh: recent), now: now))
+}
+
+@Test func codexRefreshPersistsRotatedTokensAndLastRefresh() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let auth = root.appendingPathComponent("auth.json")
+    let original: [String: Any] = [
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": NSNull(),
+        "tokens": [
+            "id_token": "old-id",
+            "access_token": "old-access",
+            "refresh_token": "old-refresh",
+            "account_id": "acct-1",
+        ],
+        "last_refresh": "2026-08-06T11:29:53.571401Z",
+    ]
+    try JSONSerialization.data(withJSONObject: original).write(to: auth)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: auth.path)
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+
+    try CodexClient.persist(
+        refresh: CodexRefresh(
+            accessToken: "new-access", refreshToken: "new-refresh", idToken: "new-id"),
+        credential: CodexCredential(
+            accessToken: "old-access", refreshToken: "old-refresh", accountID: "acct-1"),
+        at: auth, now: now)
+
+    let updated = try JSONSerialization.jsonObject(with: Data(contentsOf: auth)) as! [String: Any]
+    let tokens = try #require(updated["tokens"] as? [String: Any])
+    #expect(tokens["access_token"] as? String == "new-access")
+    #expect(tokens["refresh_token"] as? String == "new-refresh")
+    #expect(tokens["id_token"] as? String == "new-id")
+    #expect(tokens["account_id"] as? String == "acct-1")
+    #expect(updated["auth_mode"] as? String == "chatgpt")
+    #expect((updated["last_refresh"] as? String).flatMap(Date.fromISO8601) == now)
+    let attributes = try FileManager.default.attributesOfItem(atPath: auth.path)
+    #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+}
+
+@Test func codexRefreshSkipsWriteWhenTheCliAlreadyRotatedTheToken() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let auth = root.appendingPathComponent("auth.json")
+    let original: [String: Any] = ["tokens": [
+        "access_token": "cli-access",
+        "refresh_token": "cli-refresh",
+        "account_id": "acct-1",
+    ]]
+    try JSONSerialization.data(withJSONObject: original).write(to: auth)
+
+    try CodexClient.persist(
+        refresh: CodexRefresh(accessToken: "daemon-access", refreshToken: "daemon-refresh"),
+        credential: CodexCredential(accessToken: "old-access", refreshToken: "old-refresh"),
+        at: auth, now: Date())
+
+    let tokens = try #require(
+        (JSONSerialization.jsonObject(with: Data(contentsOf: auth)) as? [String: Any])?["tokens"]
+            as? [String: Any])
+    #expect(tokens["access_token"] as? String == "cli-access")
+    #expect(tokens["refresh_token"] as? String == "cli-refresh")
+}
+
+@Test func expiredCodexTokenRefreshesBeforeUsage() async throws {
+    let stub = GrokHTTPStub([
+        .init(status: 200, body: #"{"access_token":"fresh-access","refresh_token":"fresh-refresh"}"#),
+        .init(status: 200, body: codexUsageFixture),
+    ])
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let expired = unsignedJWT(exp: now.addingTimeInterval(-1).timeIntervalSince1970)
+
+    let reading = try await CodexClient.fetch(
+        credential: codexCredential(accessToken: expired), now: now,
+        send: { try await stub.send($0) })
+
+    #expect(reading.windows[0].usedFraction == 0.12)
+    #expect(reading.plan == "plus")
+    let requests = await stub.recordedRequests()
+    #expect(requests.map { $0.url?.path } == ["/oauth/token", "/backend-api/wham/usage"])
+    #expect(requests[1].value(forHTTPHeaderField: "Authorization") == "Bearer fresh-access")
+}
+
+@Test func codexUsage401RefreshesAndRetriesExactlyOnce() async throws {
+    let stub = GrokHTTPStub([
+        .init(status: 401, body: #"{"error":{"code":"token_expired","message":"expired"}}"#),
+        .init(status: 200, body: #"{"access_token":"fresh-access"}"#),
+        .init(status: 200, body: codexUsageFixture),
+    ])
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fresh = unsignedJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970)
+
+    _ = try await CodexClient.fetch(
+        credential: codexCredential(accessToken: fresh), now: now,
+        send: { try await stub.send($0) })
+
+    let requests = await stub.recordedRequests()
+    #expect(requests.map { $0.url?.path } == [
+        "/backend-api/wham/usage", "/oauth/token", "/backend-api/wham/usage",
+    ])
+    #expect(requests[2].value(forHTTPHeaderField: "Authorization") == "Bearer fresh-access")
+}
+
+@Test func codexUsageNon401DoesNotRefresh() async {
+    let stub = GrokHTTPStub([.init(status: 503, body: "unavailable")])
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fresh = unsignedJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970)
+
+    await #expect(throws: FetchError.self) {
+        try await CodexClient.fetch(
+            credential: codexCredential(accessToken: fresh), now: now,
+            send: { try await stub.send($0) })
+    }
+    #expect(await stub.recordedRequests().count == 1)
+}
+
+@Test func codexUsageSecond401SurfacesWithoutAnotherRefresh() async {
+    let stub = GrokHTTPStub([
+        .init(status: 401, body: #"{"error":{"code":"token_expired"}}"#),
+        .init(status: 200, body: #"{"access_token":"fresh-access"}"#),
+        .init(status: 401, body: #"{"error":{"code":"token_expired","message":"still expired"}}"#),
+    ])
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let fresh = unsignedJWT(exp: now.addingTimeInterval(3_600).timeIntervalSince1970)
+
+    await #expect(throws: FetchError.self) {
+        try await CodexClient.fetch(
+            credential: codexCredential(accessToken: fresh), now: now,
+            send: { try await stub.send($0) })
+    }
+    #expect(await stub.recordedRequests().count == 3)
+}
+
 @Test func antigravityWindowWordsBecomeShortLabels() {
     // Antigravity says "weekly" where the others report a length. One column
     // width has to fit every provider, so the words normalise to the same form.

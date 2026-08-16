@@ -301,9 +301,10 @@ struct GrokClient: UsageProviderClient {
             return try Self.reading(from: payload, email: credential.email)
         }
 
-        // Unified-billing accounts get a credits payload without
-        // creditUsagePercent. The plain endpoint still reports their token
-        // counts, so read the percentage from used / monthlyLimit instead.
+        // Unified-billing accounts omit creditUsagePercent. Token-metered
+        // plans still report used / monthlyLimit on the plain endpoint.
+        // SuperGrok weekly credits report monthlyLimit 0; treat a missing
+        // percent as 0 on the weekly window instead of failing the row.
         let (tokenData, tokenResponse) = try await send(
             Self.tokenBillingRequest(accessToken: accessToken))
         guard (200..<300).contains(tokenResponse.statusCode) else {
@@ -312,7 +313,14 @@ struct GrokClient: UsageProviderClient {
         }
         guard let tokenPayload = try JSONSerialization.jsonObject(with: tokenData) as? [String: Any]
         else { throw FetchError.badPayload("not a JSON object") }
-        return try Self.tokenReading(from: tokenPayload, email: credential.email)
+        if let limit = tokenPayload.dict("config")?.dict("monthlyLimit")?.double("val"),
+           limit > 0 {
+            return try Self.tokenReading(from: tokenPayload, email: credential.email)
+        }
+        if payload.dict("config")?.dict("currentPeriod") != nil {
+            return try Self.reading(from: payload, email: credential.email)
+        }
+        throw FetchError.badPayload("no creditUsagePercent")
     }
 
     static func billingRequest(accessToken: String) -> URLRequest {
@@ -449,9 +457,16 @@ struct GrokClient: UsageProviderClient {
     }
 
     static func reading(from payload: [String: Any], email: String?) throws -> ProviderReading {
-        guard let config = payload.dict("config"),
-              let usedPercent = config.double("creditUsagePercent")
-        else { throw FetchError.badPayload("no creditUsagePercent") }
+        guard let config = payload.dict("config") else {
+            throw FetchError.badPayload("no creditUsagePercent")
+        }
+        let usedPercent = config.double("creditUsagePercent")
+        // Proto3 omits 0, so SuperGrok at the start of a week has a period
+        // and no percent. Empty config is still an error.
+        guard usedPercent != nil || config.dict("currentPeriod") != nil else {
+            throw FetchError.badPayload("no creditUsagePercent")
+        }
+        let usedPercentValue = usedPercent ?? 0
 
         let period = config.dict("currentPeriod")
         let startsAt = period?.string("start").flatMap(Date.fromISO8601)
@@ -468,7 +483,7 @@ struct GrokClient: UsageProviderClient {
             email: email,
             windows: [UsageWindow(
                 label: label,
-                usedFraction: max(0, min(100, usedPercent)) / 100,
+                usedFraction: max(0, min(100, usedPercentValue)) / 100,
                 resetsAt: resetsAt)])
     }
 

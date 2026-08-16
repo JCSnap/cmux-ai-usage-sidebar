@@ -152,6 +152,25 @@ import UsageModels
     }
 }
 
+@Test func grokBillingTreatsOmittedPercentAsZeroWhenPeriodExists() throws {
+    // SuperGrok unified billing omits creditUsagePercent at 0 (proto default).
+    let payload: [String: Any] = ["config": [
+        "currentPeriod": [
+            "type": "USAGE_PERIOD_TYPE_WEEKLY",
+            "start": "2026-08-15T19:17:43.386846+00:00",
+            "end": "2026-08-22T19:17:43.386846+00:00",
+        ],
+        "isUnifiedBillingUser": true,
+    ]]
+
+    let reading = try GrokClient.reading(from: payload, email: "person@example.com")
+    #expect(reading.email == "person@example.com")
+    #expect(reading.windows.count == 1)
+    #expect(reading.windows[0].label == "7d")
+    #expect(reading.windows[0].usedFraction == 0)
+    #expect(reading.windows[0].resetsAt != nil)
+}
+
 @Test func grokTokenBillingConvertsCountsToAFraction() throws {
     let payload: [String: Any] = ["config": [
         "monthlyLimit": ["val": 15_000.0],
@@ -287,6 +306,33 @@ private func grokCredential(expiresAt: Date?) -> GrokCredential {
         "https://cli-chat-proxy.grok.com/v1/billing",
     ])
     #expect(requests[1].value(forHTTPHeaderField: "Authorization") == "Bearer stored-access")
+}
+
+@Test func unifiedBillingWithZeroMonthlyLimitUsesTheWeeklyPeriod() async throws {
+    // Live SuperGrok shape: credits has a weekly window and no percent,
+    // tokens report monthlyLimit 0. Do not treat that as an error.
+    let stub = GrokHTTPStub([
+        .init(status: 200, body: """
+            {"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY",
+            "start":"2026-08-15T19:17:43.386846+00:00",
+            "end":"2026-08-22T19:17:43.386846+00:00"},
+            "isUnifiedBillingUser":true}}
+            """),
+        .init(status: 200, body: """
+            {"config":{"monthlyLimit":{"val":0},"used":{"val":231},
+            "billingPeriodStart":"2026-08-01T00:00:00+00:00",
+            "billingPeriodEnd":"2026-09-01T00:00:00+00:00"}}
+            """),
+    ])
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+
+    let reading = try await GrokClient.fetch(
+        credential: grokCredential(expiresAt: now.addingTimeInterval(3_600)), now: now,
+        send: { try await stub.send($0) })
+
+    #expect(reading.windows[0].usedFraction == 0)
+    #expect(reading.windows[0].label == "7d")
+    #expect(reading.windows[0].resetsAt != nil)
 }
 
 @Test func grokBilling401RefreshesAndRetriesExactlyOnce() async throws {

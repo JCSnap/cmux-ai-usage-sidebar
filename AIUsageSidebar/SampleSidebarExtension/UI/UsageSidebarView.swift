@@ -51,10 +51,18 @@ struct UsagePanel: View {
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .imageScale(.small)
+                    .rotationEffect(.degrees(store.isRefreshing ? 360 : 0))
+                    .animation(
+                        store.isRefreshing
+                            ? .linear(duration: 0.8).repeatForever(autoreverses: false)
+                            : .default,
+                        value: store.isRefreshing
+                    )
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Refresh now")
+            .foregroundStyle(store.isRefreshing ? Color.accentColor : .secondary)
+            .disabled(store.isRefreshing)
+            .help(store.isRefreshing ? "Refreshing..." : "Refresh now")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -63,20 +71,24 @@ struct UsagePanel: View {
 
     @ViewBuilder
     private var freshness: some View {
-        switch store.health {
-        case .loading:
+        if store.isRefreshing {
             ProgressView().controlSize(.mini)
-        case .live:
-            // Shows staleness rather than a fixed clock time: the useful
-            // question is "is this current", not "when was it taken".
-            Text(store.snapshot.generatedAt, format: .relative(presentation: .numeric))
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-        case let .unreachable(reason):
-            Image(systemName: "exclamationmark.triangle.fill")
-                .imageScale(.small)
-                .foregroundStyle(.orange)
-                .help("Daemon unreachable: \(reason)")
+        } else {
+            switch store.health {
+            case .loading:
+                ProgressView().controlSize(.mini)
+            case .live:
+                // Shows staleness rather than a fixed clock time: the useful
+                // question is "is this current", not "when was it taken".
+                Text(store.snapshot.generatedAt, format: .relative(presentation: .numeric))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            case let .unreachable(reason):
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .imageScale(.small)
+                    .foregroundStyle(.orange)
+                    .help("Daemon unreachable: \(reason)")
+            }
         }
     }
 

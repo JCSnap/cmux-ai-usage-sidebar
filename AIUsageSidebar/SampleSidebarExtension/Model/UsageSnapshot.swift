@@ -26,6 +26,10 @@ public enum UsageAccountState: String, Codable, Sendable {
     case ok
     /// No credential is stored. The account needs a login, not a fix.
     case signedOut
+    /// The last read failed, but the numbers from an earlier read are recent
+    /// enough to show. `windows` holds them, `updatedAt` says when they were
+    /// read, and `detail` says why the refresh failed.
+    case stale
     /// A credential exists but the read failed. `detail` says why.
     case error
 }
@@ -66,8 +70,11 @@ public struct UsageAccount: Codable, Sendable, Hashable, Identifiable {
     public let email: String?
     public let state: UsageAccountState
     public let windows: [UsageWindow]
-    /// Failure text when `state` is `.error`, otherwise nil.
+    /// Failure text when `state` is `.error` or `.stale`, otherwise nil.
     public let detail: String?
+    /// When `windows` were read from the vendor. A `.stale` account keeps the
+    /// time of its last good read, so the panel can say how old the bars are.
+    public let updatedAt: Date?
 
     public init(
         id: String,
@@ -77,7 +84,8 @@ public struct UsageAccount: Codable, Sendable, Hashable, Identifiable {
         email: String? = nil,
         state: UsageAccountState,
         windows: [UsageWindow] = [],
-        detail: String? = nil
+        detail: String? = nil,
+        updatedAt: Date? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -87,7 +95,12 @@ public struct UsageAccount: Codable, Sendable, Hashable, Identifiable {
         self.state = state
         self.windows = windows
         self.detail = detail
+        self.updatedAt = updatedAt
     }
+
+    /// Whether the row has numbers to draw. A stale account still does; its
+    /// bars are simply older than one refresh cycle.
+    public var showsWindows: Bool { state == .ok || state == .stale }
 
     /// The window that is closest to its limit. Drives the one-line summary.
     public var worstWindow: UsageWindow? {

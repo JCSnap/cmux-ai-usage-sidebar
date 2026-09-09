@@ -46,6 +46,7 @@ PLIST
 
 echo "==> Loading the agent"
 launchctl bootout "gui/$UID/$label" 2>/dev/null || true
+launchctl enable "gui/$UID/$label" 2>/dev/null || true
 launchctl bootstrap "gui/$UID" "$plist"
 
 echo "==> Waiting for the first snapshot"

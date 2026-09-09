@@ -717,6 +717,16 @@ private final class GrokLockReplacementHook: @unchecked Sendable {
         UsageSnapshot.self, from: await store.body())
 
     #expect(decoded == initial)
+    #expect(await store.snapshot() == initial)
+
+    let updated = UsageSnapshot(
+        generatedAt: Date(timeIntervalSince1970: 1_785_576_000),
+        accounts: [])
+    await store.update(updated)
+    #expect(await store.snapshot() == updated)
+    let decodedUpdated = try UsageSnapshot.decoder().decode(
+        UsageSnapshot.self, from: await store.body())
+    #expect(decodedUpdated == updated)
 }
 
 @Test func keychainDumpYieldsEveryClaudeProfile() {
@@ -818,4 +828,147 @@ private final class GrokLockReplacementHook: @unchecked Sendable {
     #expect(Discovery.claudeServices(inKeychainDump: "") == [])
     #expect(Discovery.accounts(home: "/nonexistent-home").isEmpty
         || !Discovery.accounts(home: "/nonexistent-home").contains { $0.provider != .claude })
+}
+
+// MARK: - Transient status retry
+
+private func httpResponse(_ status: Int, retryAfter: String? = nil) -> HTTPURLResponse {
+    var headers: [String: String] = [:]
+    if let retryAfter { headers["Retry-After"] = retryAfter }
+    return HTTPURLResponse(
+        url: URL(string: "https://api.anthropic.com/api/oauth/usage")!,
+        statusCode: status, httpVersion: nil, headerFields: headers)!
+}
+
+@Test func rateLimitAndServerErrorsAreWorthAnotherTry() {
+    #expect(Http.isTransient(429))
+    #expect(Http.isTransient(503))
+    #expect(!Http.isTransient(200))
+    #expect(!Http.isTransient(401))
+    #expect(!Http.isTransient(404))
+}
+
+@Test func backoffPrefersRetryAfterButStaysInsideTheCeiling() {
+    #expect(Http.backoff(retryAfter: nil, attempt: 1) == 1)
+    #expect(Http.backoff(retryAfter: nil, attempt: 2) == 2)
+    #expect(Http.backoff(retryAfter: "3", attempt: 1) == 3)
+    // Anthropic can name a whole minute. The collect must not wait that long.
+    #expect(Http.backoff(retryAfter: "600", attempt: 1) == Http.retryCeiling)
+    // A date-form or malformed header falls back to the plain schedule.
+    #expect(Http.backoff(retryAfter: "Wed, 21 Oct 2026 07:28:00 GMT", attempt: 2) == 2)
+}
+
+@Test func aRateLimitedCallIsRetriedAndThenSucceeds() async throws {
+    let sent = Counter()
+    let (data, response) = try await Http.retrying(
+        URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!),
+        sleep: { _ in },
+        send: { _ in
+            let attempt = await sent.next()
+            return attempt == 1
+                ? (Data("limited".utf8), httpResponse(429, retryAfter: "1"))
+                : (Data("{\"five_hour\":{}}".utf8), httpResponse(200))
+        })
+
+    #expect(await sent.count == 2)
+    #expect(response.statusCode == 200)
+    #expect(String(decoding: data, as: UTF8.self) == "{\"five_hour\":{}}")
+}
+
+@Test func aPersistentRateLimitStopsAtTheAttemptLimit() async throws {
+    let sent = Counter()
+    let (_, response) = try await Http.retrying(
+        URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!),
+        sleep: { _ in },
+        send: { _ in
+            _ = await sent.next()
+            return (Data("limited".utf8), httpResponse(429))
+        })
+
+    #expect(await sent.count == Http.attempts)
+    #expect(response.statusCode == 429)
+}
+
+@Test func anUnauthorizedCallIsNotRetried() async throws {
+    let sent = Counter()
+    let (_, response) = try await Http.retrying(
+        URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!),
+        sleep: { _ in },
+        send: { _ in
+            _ = await sent.next()
+            return (Data(), httpResponse(401))
+        })
+
+    #expect(await sent.count == 1)
+    #expect(response.statusCode == 401)
+}
+
+private actor Counter {
+    private(set) var count = 0
+    func next() -> Int {
+        count += 1
+        return count
+    }
+}
+
+// MARK: - Stale carry-over
+
+private let cc1 = AccountConfig(
+    id: "cc1", provider: .claude, displayName: "cc1",
+    keychainService: "Claude Code-credentials")
+
+private func goodRead(at: Date) -> UsageAccount {
+    UsageAccount(
+        id: "cc1", provider: .claude, displayName: "cc1", plan: "max",
+        email: "person@example.com", state: .ok,
+        windows: [UsageWindow(label: "5h", usedFraction: 0.2)], updatedAt: at)
+}
+
+@Test func aFailedReadKeepsRecentNumbersInsteadOfBlankingTheRow() {
+    let read = Date(timeIntervalSince1970: 1_785_575_910)
+    let account = UsageCollector.failed(
+        cc1, earlier: goodRead(at: read), now: read.addingTimeInterval(300),
+        detail: "HTTP 429: rate_limit_error")
+
+    #expect(account.state == .stale)
+    #expect(account.windows.first?.usedFraction == 0.2)
+    #expect(account.plan == "max")
+    #expect(account.email == "person@example.com")
+    #expect(account.detail == "HTTP 429: rate_limit_error")
+    // The age is the last good read, not this failure, so repeated failures
+    // walk towards the limit rather than renewing the numbers forever.
+    #expect(account.updatedAt == read)
+}
+
+@Test func numbersOlderThanTheStaleLimitGiveWayToTheError() {
+    let read = Date(timeIntervalSince1970: 1_785_575_910)
+    let account = UsageCollector.failed(
+        cc1, earlier: goodRead(at: read),
+        now: read.addingTimeInterval(UsageCollector.staleLimit + 1),
+        detail: "HTTP 429: rate_limit_error")
+
+    #expect(account.state == .error)
+    #expect(account.windows.isEmpty)
+    #expect(account.detail == "HTTP 429: rate_limit_error")
+}
+
+@Test func aFirstReadThatFailsHasNothingToCarryOver() {
+    let now = Date(timeIntervalSince1970: 1_785_575_910)
+    #expect(UsageCollector.failed(cc1, earlier: nil, now: now, detail: "boom").state == .error)
+    // A previous row that itself had no numbers is not worth showing either.
+    let empty = UsageAccount(
+        id: "cc1", provider: .claude, displayName: "cc1", state: .error, detail: "boom")
+    #expect(UsageCollector.failed(cc1, earlier: empty, now: now, detail: "boom").state == .error)
+}
+
+@Test func staleAccountsStillDrawTheirBars() {
+    let read = Date(timeIntervalSince1970: 1_785_575_910)
+    #expect(goodRead(at: read).showsWindows)
+    #expect(UsageCollector.failed(
+        cc1, earlier: goodRead(at: read), now: read.addingTimeInterval(60),
+        detail: "boom").showsWindows)
+    #expect(!UsageAccount(
+        id: "cc1", provider: .claude, displayName: "cc1", state: .error).showsWindows)
+    #expect(!UsageAccount(
+        id: "cc1", provider: .claude, displayName: "cc1", state: .signedOut).showsWindows)
 }

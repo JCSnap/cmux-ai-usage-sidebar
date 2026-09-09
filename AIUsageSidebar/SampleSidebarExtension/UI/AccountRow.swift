@@ -19,7 +19,7 @@ struct AccountRow: View {
                     .truncationMode(.middle)
             }
             switch account.state {
-            case .ok:
+            case .ok, .stale:
                 ForEach(groupedWindows, id: \.name) { group in
                     VStack(alignment: .leading, spacing: 3) {
                         if let name = group.name {
@@ -32,6 +32,7 @@ struct AccountRow: View {
                         ForEach(group.windows) { UsageMeter(window: $0, showsReset: showsDetail) }
                     }
                 }
+                if account.state == .stale { staleNote }
             case .signedOut:
                 Text("Not signed in")
                     .font(.system(size: 10))
@@ -70,8 +71,26 @@ struct AccountRow: View {
         switch account.state {
         case .signedOut: .secondary.opacity(0.4)
         case .error: .red
+        case .stale: .yellow
         case .ok: UsageMeter.tint(for: account.worstWindow?.usedFraction ?? 0)
         }
+    }
+
+    /// Marks bars that the last refresh could not renew. The age matters more
+    /// than the cause, so the cause appears only with the rest of the detail.
+    private var staleNote: some View {
+        Text(showsDetail ? "Stale · \(staleAge) · \(account.detail ?? "refresh failed")"
+                         : "Stale · \(staleAge)")
+            .font(.system(size: 9))
+            .foregroundStyle(.tertiary)
+            .lineLimit(2)
+    }
+
+    /// How old the shown numbers are, in whole minutes. The panel repolls every
+    /// 60 seconds, which redraws this often enough.
+    private var staleAge: String {
+        guard let updatedAt = account.updatedAt else { return "earlier" }
+        return "\(max(1, Int(Date().timeIntervalSince(updatedAt) / 60)))m old"
     }
 
     /// Antigravity meters two model groups; the other providers report one

@@ -58,14 +58,63 @@ enum Http {
         return URLSession(configuration: config)
     }()
 
+    /// How many times one request is sent before its status is returned as the
+    /// answer. Three means the first send plus two retries.
+    static let attempts = 3
+    /// Longest wait between two attempts. A vendor can name a whole minute in
+    /// `Retry-After`, and waiting that long would hold the collect open.
+    static let retryCeiling: TimeInterval = 8
+
     /// Performs a request without interpreting its status code. Providers that
     /// need status-aware recovery (such as an OAuth retry on 401) use this.
+    ///
+    /// A transient status is retried first. The usage endpoints are also called
+    /// by each agent CLI, so a short burst can rate-limit this daemon for one
+    /// call only. Retrying costs a second and saves a whole refresh cycle.
     static func response(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        try await retrying(request, send: once)
+    }
+
+    /// Sends the request once. No status is interpreted here.
+    static func once(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let (data, response) = try await session.data(for: request)
         guard let response = response as? HTTPURLResponse else {
             throw FetchError.badStatus(0, String(decoding: data, as: UTF8.self))
         }
         return (data, response)
+    }
+
+    /// Retry loop around one sender. `send` and `sleep` are injected so a test
+    /// can drive the loop without a socket and without real time.
+    static func retrying(
+        _ request: URLRequest,
+        sleep: @Sendable (TimeInterval) async -> Void = { try? await Task.sleep(for: .seconds($0)) },
+        send: @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
+    ) async throws -> (Data, HTTPURLResponse) {
+        var attempt = 1
+        while true {
+            let (data, response) = try await send(request)
+            guard attempt < attempts, isTransient(response.statusCode) else { return (data, response) }
+            await sleep(backoff(
+                retryAfter: response.value(forHTTPHeaderField: "Retry-After"), attempt: attempt))
+            attempt += 1
+        }
+    }
+
+    /// 429 is a rate limit and 5xx is the vendor, not the request. Both can
+    /// clear on their own. Every other status is the answer to the call.
+    static func isTransient(_ status: Int) -> Bool {
+        status == 429 || (500..<600).contains(status)
+    }
+
+    /// The vendor `Retry-After` in seconds when it sends a usable one, else one
+    /// second and then two. Always inside `retryCeiling`.
+    static func backoff(retryAfter: String?, attempt: Int) -> TimeInterval {
+        let named = retryAfter
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .flatMap(TimeInterval.init)
+        let wait = named ?? pow(2, Double(attempt - 1))
+        return min(max(wait, 0), retryCeiling)
     }
 
     /// Performs a request and returns the body, or throws with the status text.

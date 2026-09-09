@@ -19,6 +19,7 @@ final class UsageStore {
 
     private(set) var snapshot = UsageSnapshot.empty
     private(set) var health = Health.loading
+    private(set) var isRefreshing = false
 
     /// Must match `port` in ~/.config/ai-usage/config.json.
     private let endpoint = URL(string: "http://127.0.0.1:47823/")!
@@ -27,7 +28,7 @@ final class UsageStore {
 
     private let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 5
+        config.timeoutIntervalForRequest = 30
         config.waitsForConnectivity = false
         return URLSession(configuration: config)
     }()
@@ -36,7 +37,7 @@ final class UsageStore {
         guard poller == nil else { return }
         poller = Task { [weak self] in
             while !Task.isCancelled {
-                await self?.refresh()
+                await self?.fetchLatest()
                 try? await Task.sleep(for: self?.interval ?? .seconds(60))
             }
         }
@@ -47,7 +48,8 @@ final class UsageStore {
         poller = nil
     }
 
-    func refresh() async {
+    /// Background poll: quickly fetches the daemon's current snapshot.
+    func fetchLatest() async {
         do {
             var request = URLRequest(url: endpoint)
             request.cachePolicy = .reloadIgnoringLocalCacheData
@@ -57,6 +59,24 @@ final class UsageStore {
         } catch {
             // Keep the last good snapshot on screen. A stale number beats an
             // empty panel, and the header shows how old it is.
+            health = .unreachable(error.localizedDescription)
+        }
+    }
+
+    /// On-demand refresh: tells the daemon to collect fresh usage from all providers.
+    func refresh() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
+
+        do {
+            var request = URLRequest(url: endpoint.appendingPathComponent("refresh"))
+            request.httpMethod = "POST"
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            let (data, _) = try await session.data(for: request)
+            snapshot = try UsageSnapshot.decoder().decode(UsageSnapshot.self, from: data)
+            health = .live
+        } catch {
             health = .unreachable(error.localizedDescription)
         }
     }

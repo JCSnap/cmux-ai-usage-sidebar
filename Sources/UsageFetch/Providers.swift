@@ -36,13 +36,39 @@ struct ClaudeClient: UsageProviderClient {
               let token = oauth.string("accessToken"), !token.isEmpty
         else { throw FetchError.noCredential }
 
-        let payload = try await Http.json(Http.get(
+        let (blocked, remaining) = await CooldownTracker.shared.isBlocked(account.id)
+        if blocked {
+            let minutes = Int(ceil(remaining / 60))
+            throw FetchError.badStatus(429, "rate limited (cooling down for ~\(minutes)m to avoid resetting Anthropic window)")
+        }
+
+        let request = Http.get(
             "https://api.anthropic.com/api/oauth/usage",
             headers: [
                 "Authorization": "Bearer \(token)",
                 "Accept": "application/json",
                 "anthropic-beta": "oauth-2025-04-20",
-            ]))
+            ])
+
+        let (data, response) = try await Http.response(request)
+        if response.statusCode == 429 {
+            if let retryAfter = response.value(forHTTPHeaderField: "Retry-After")
+                .map({ $0.trimmingCharacters(in: CharacterSet.whitespaces) })
+                .flatMap(TimeInterval.init), retryAfter > 0 {
+                await CooldownTracker.shared.block(account.id, for: retryAfter)
+            }
+            throw FetchError.badStatus(429, String(decoding: data, as: UTF8.self))
+        }
+
+        guard (200..<300).contains(response.statusCode) else {
+            throw FetchError.badStatus(response.statusCode, String(decoding: data, as: UTF8.self))
+        }
+
+        await CooldownTracker.shared.clear(account.id)
+
+        guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw FetchError.badPayload("not a JSON object")
+        }
 
         func window(_ key: String, _ label: String) -> UsageWindow? {
             guard let block = payload.dict(key) else { return nil }

@@ -848,14 +848,44 @@ private func httpResponse(_ status: Int, retryAfter: String? = nil) -> HTTPURLRe
     #expect(!Http.isTransient(404))
 }
 
-@Test func backoffPrefersRetryAfterButStaysInsideTheCeiling() {
+@Test func backoffRejectsRetryAfterLargerThanCeiling() {
     #expect(Http.backoff(retryAfter: nil, attempt: 1) == 1)
     #expect(Http.backoff(retryAfter: nil, attempt: 2) == 2)
     #expect(Http.backoff(retryAfter: "3", attempt: 1) == 3)
-    // Anthropic can name a whole minute. The collect must not wait that long.
-    #expect(Http.backoff(retryAfter: "600", attempt: 1) == Http.retryCeiling)
+    // When the vendor asks to wait 600s or 1400s, do not retry immediately.
+    #expect(Http.backoff(retryAfter: "600", attempt: 1) == nil)
+    #expect(Http.backoff(retryAfter: "1400", attempt: 1) == nil)
     // A date-form or malformed header falls back to the plain schedule.
     #expect(Http.backoff(retryAfter: "Wed, 21 Oct 2026 07:28:00 GMT", attempt: 2) == 2)
+}
+
+@Test func aLongRetryAfterBailsImmediatelyWithoutRetrying() async throws {
+    let sent = Counter()
+    let (_, response) = try await Http.retrying(
+        URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!),
+        sleep: { _ in },
+        send: { _ in
+            _ = await sent.next()
+            return (Data("limited".utf8), httpResponse(429, retryAfter: "1400"))
+        })
+
+    #expect(await sent.count == 1)
+    #expect(response.statusCode == 429)
+}
+
+@Test func cooldownTrackerBlocksUntilTimeElapses() async {
+    let tracker = CooldownTracker()
+    let now = Date(timeIntervalSince1970: 1_000_000)
+
+    #expect(await !tracker.isBlocked("cc1", now: now).blocked)
+    await tracker.block("cc1", for: 60, now: now)
+
+    let (blocked1, rem1) = await tracker.isBlocked("cc1", now: now.addingTimeInterval(10))
+    #expect(blocked1)
+    #expect(rem1 == 50)
+
+    let (blocked2, _) = await tracker.isBlocked("cc1", now: now.addingTimeInterval(61))
+    #expect(!blocked2)
 }
 
 @Test func aRateLimitedCallIsRetriedAndThenSucceeds() async throws {

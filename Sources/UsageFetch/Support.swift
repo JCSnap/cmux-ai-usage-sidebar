@@ -95,8 +95,12 @@ enum Http {
         while true {
             let (data, response) = try await send(request)
             guard attempt < attempts, isTransient(response.statusCode) else { return (data, response) }
-            await sleep(backoff(
-                retryAfter: response.value(forHTTPHeaderField: "Retry-After"), attempt: attempt))
+            guard let delay = backoff(
+                retryAfter: response.value(forHTTPHeaderField: "Retry-After"), attempt: attempt)
+            else {
+                return (data, response)
+            }
+            await sleep(delay)
             attempt += 1
         }
     }
@@ -108,13 +112,16 @@ enum Http {
     }
 
     /// The vendor `Retry-After` in seconds when it sends a usable one, else one
-    /// second and then two. Always inside `retryCeiling`.
-    static func backoff(retryAfter: String?, attempt: Int) -> TimeInterval {
-        let named = retryAfter
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .flatMap(TimeInterval.init)
-        let wait = named ?? pow(2, Double(attempt - 1))
-        return min(max(wait, 0), retryCeiling)
+    /// second and then two. If `Retry-After` is larger than `retryCeiling`, returns
+    /// nil so the caller does not hammer an endpoint that requested a long cooldown.
+    static func backoff(retryAfter: String?, attempt: Int) -> TimeInterval? {
+        if let named = retryAfter
+            .map({ $0.trimmingCharacters(in: .whitespaces) })
+            .flatMap(TimeInterval.init) {
+            guard named <= retryCeiling else { return nil }
+            return max(named, 0)
+        }
+        return pow(2, Double(attempt - 1))
     }
 
     /// Performs a request and returns the body, or throws with the status text.
@@ -157,6 +164,34 @@ enum Http {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: object)
         return request
+    }
+}
+
+/// Tracks vendor-requested rate-limit cooldowns across collection cycles.
+///
+/// When an API explicitly asks for a long wait via `Retry-After` (e.g. 23 minutes),
+/// continuing to poll every 5 minutes resets or extends the vendor's rate-limit window.
+/// This tracker holds off requests until the window has elapsed.
+public actor CooldownTracker {
+    public static let shared = CooldownTracker()
+    private var blockedUntil: [String: Date] = [:]
+
+    public init() {}
+
+    public func isBlocked(_ key: String, now: Date = Date()) -> (blocked: Bool, remaining: TimeInterval) {
+        guard let until = blockedUntil[key], now < until else {
+            blockedUntil.removeValue(forKey: key)
+            return (false, 0)
+        }
+        return (true, until.timeIntervalSince(now))
+    }
+
+    public func block(_ key: String, for seconds: TimeInterval, now: Date = Date()) {
+        blockedUntil[key] = now.addingTimeInterval(seconds)
+    }
+
+    public func clear(_ key: String) {
+        blockedUntil.removeValue(forKey: key)
     }
 }
 

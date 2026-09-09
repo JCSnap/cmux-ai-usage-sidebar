@@ -41,6 +41,9 @@ for stale in "$derived/Build/Products"/*/"$app_name"; do
     [ -d "$stale" ] && "$lsregister" -u "$stale" 2>/dev/null || true
 done
 
+# Terminate any running extension instances so cmux spawns the new build
+pkill -f "AI Usage Sidebar Extension" 2>/dev/null || true
+
 echo "==> Launching once so macOS registers the extension"
 open "/Applications/$app_name"
 sleep 4

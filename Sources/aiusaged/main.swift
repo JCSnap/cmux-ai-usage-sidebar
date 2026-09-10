@@ -89,7 +89,8 @@ if config.accounts.isEmpty {
 if arguments.contains("--once") {
     // One-shot mode: print the snapshot and exit. Useful for testing the
     // credential path without running the agent, and for piping into a TUI.
-    let snapshot = await collector.collect(config)
+    let cached = SnapshotStore.loadCache() ?? .empty
+    let snapshot = await collector.collect(config, previous: cached)
     FileHandle.standardOutput.write(try UsageSnapshot.encoder().encode(snapshot))
     FileHandle.standardOutput.write(Data("\n".utf8))
     exit(0)
@@ -116,7 +117,7 @@ actor RefreshCoordinator {
         if let inFlight {
             return await inFlight.value
         }
-        if !force && Date().timeIntervalSince(lastRefresh) < 2.0 {
+        if !force && Date().timeIntervalSince(lastRefresh) < 60.0 {
             return await store.body()
         }
         let task = Task { () -> Data in
@@ -135,8 +136,10 @@ actor RefreshCoordinator {
 
 // Complete the first provider refresh before opening the port. Otherwise the
 // installer and sidebar can observe and cache a placeholder empty snapshot.
-let snapshot = await collector.collect(config)
-let store = SnapshotStore(initial: snapshot)
+// Pass in any cached snapshot so restarts never wipe out valid numbers on failure.
+let cached = SnapshotStore.loadCache() ?? .empty
+let snapshot = await collector.collect(config, previous: cached)
+let store = SnapshotStore(initial: snapshot, cachePath: Config.cachePath)
 let coordinator = RefreshCoordinator(store: store, collector: collector, config: config)
 let server = try UsageServer(port: config.port, store: store, onRefresh: {
     await coordinator.refresh()

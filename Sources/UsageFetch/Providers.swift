@@ -52,11 +52,11 @@ struct ClaudeClient: UsageProviderClient {
 
         let (data, response) = try await Http.response(request)
         if response.statusCode == 429 {
-            if let retryAfter = response.value(forHTTPHeaderField: "Retry-After")
+            let headerRetryAfter = response.value(forHTTPHeaderField: "Retry-After")
                 .map({ $0.trimmingCharacters(in: CharacterSet.whitespaces) })
-                .flatMap(TimeInterval.init), retryAfter > 0 {
-                await CooldownTracker.shared.block(account.id, for: retryAfter)
-            }
+                .flatMap(TimeInterval.init)
+            let cooldown = (headerRetryAfter != nil && headerRetryAfter! > 0) ? headerRetryAfter! : 300
+            await CooldownTracker.shared.block(account.id, for: cooldown)
             throw FetchError.badStatus(429, String(decoding: data, as: UTF8.self))
         }
 

@@ -729,6 +729,32 @@ private final class GrokLockReplacementHook: @unchecked Sendable {
     #expect(decodedUpdated == updated)
 }
 
+@Test func snapshotStorePersistsAndLoadsFromDisk() async throws {
+    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+    let initial = UsageSnapshot(
+        generatedAt: Date(timeIntervalSince1970: 1_785_575_910),
+        accounts: [UsageAccount(
+            id: "cc1", provider: .claude, displayName: "cc1", state: .ok,
+            windows: [UsageWindow(label: "5h", usedFraction: 0.5)])])
+
+    #expect(SnapshotStore.loadCache(from: tmp) == nil)
+    SnapshotStore.saveCache(initial, to: tmp)
+
+    let loaded = SnapshotStore.loadCache(from: tmp)
+    #expect(loaded == initial)
+
+    let store = SnapshotStore(initial: initial, cachePath: tmp)
+    let updated = UsageSnapshot(
+        generatedAt: Date(timeIntervalSince1970: 1_785_576_000),
+        accounts: [])
+    await store.update(updated)
+
+    let reloaded = SnapshotStore.loadCache(from: tmp)
+    #expect(reloaded == updated)
+}
+
 @Test func keychainDumpYieldsEveryClaudeProfile() {
     // A trimmed `security dump-keychain` listing. Each item prints one
     // attribute per line, and unrelated items share the same shape.

@@ -14,7 +14,7 @@ public struct UsageCollector: Sendable {
     /// How long numbers from a failed read stay on screen. Past this the row
     /// shows the failure instead, because a bar that never expires reads as
     /// live and is then worse than no bar at all.
-    public static let staleLimit: TimeInterval = 30 * 60
+    public static let staleLimit: TimeInterval = 24 * 60 * 60
 
     public init() {}
 
@@ -26,12 +26,25 @@ public struct UsageCollector: Sendable {
         now: Date = Date()
     ) async -> UsageSnapshot {
         let earlier = Dictionary(previous.accounts.map { ($0.id, $0) }) { first, _ in first }
-        let accounts = await withTaskGroup(of: (Int, UsageAccount).self) { group in
-            for (index, account) in config.accounts.enumerated() {
-                group.addTask { (index, await read(account, earlier: earlier[account.id], now: now)) }
+        let providerGroups = Dictionary(grouping: config.accounts.enumerated()) { $0.element.provider }
+        let accounts = await withTaskGroup(of: [(Int, UsageAccount)].self) { group in
+            for (_, groupAccounts) in providerGroups {
+                group.addTask {
+                    var results: [(Int, UsageAccount)] = []
+                    for (i, (index, account)) in groupAccounts.enumerated() {
+                        if i > 0 && account.provider == .claude {
+                            try? await Task.sleep(for: .seconds(2))
+                        }
+                        let acct = await read(account, earlier: earlier[account.id], now: now)
+                        results.append((index, acct))
+                    }
+                    return results
+                }
             }
             var collected: [(Int, UsageAccount)] = []
-            for await result in group { collected.append(result) }
+            for await groupResults in group {
+                collected.append(contentsOf: groupResults)
+            }
             // Restore configuration order; task completion order is arbitrary.
             return collected.sorted { $0.0 < $1.0 }.map(\.1)
         }

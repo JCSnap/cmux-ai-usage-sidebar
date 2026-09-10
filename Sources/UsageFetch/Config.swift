@@ -55,6 +55,7 @@ public struct Config: Codable, Sendable {
     }
 
     public static let path = NSString(string: "~/.config/ai-usage/config.json").expandingTildeInPath
+    public static let cachePath = NSString(string: "~/.config/ai-usage/cache.json").expandingTildeInPath
 
     /// The accounts that exist on this machine.
     ///

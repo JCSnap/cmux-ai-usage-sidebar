@@ -11,6 +11,9 @@ public actor SnapshotStore {
         self.current = initial
         self.encoded = (try? UsageSnapshot.encoder().encode(initial)) ?? Data()
         self.cachePath = cachePath
+        if let cachePath {
+            Self.saveCache(initial, to: cachePath)
+        }
     }
 
     public func update(_ new: UsageSnapshot) {

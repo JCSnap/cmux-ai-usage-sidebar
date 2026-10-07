@@ -1,12 +1,23 @@
 import SwiftUI
 
 /// One account: a header line, then one meter per rate-limit window.
+///
+/// A CLIProxyAPI pool draws the same way, with bars that average its logins.
+/// Its header carries a disclosure that lists each login as a nested row.
 struct AccountRow: View {
     let account: UsageAccount
 
     /// Reveals reset times and the signed-in address. Driven by one toggle in
     /// the panel header, so every account discloses together.
     var showsDetail = false
+
+    /// A login inside an expanded pool. Drawn smaller, because the pool row
+    /// above it already names the provider and the alias.
+    var isMember = false
+
+    /// Per pool, not panel-wide like `showsDetail`: one pool is usually
+    /// opened to see which login is hot, and the others can stay closed.
+    @State private var showsMembers = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -33,6 +44,7 @@ struct AccountRow: View {
                     }
                 }
                 if account.state == .stale { staleNote }
+                if showsMembers { memberList }
             case .signedOut:
                 Text("Not signed in")
                     .font(.system(size: 10))
@@ -42,18 +54,59 @@ struct AccountRow: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.red.opacity(0.8))
                     .lineLimit(2)
+                if showsMembers { memberList }
             }
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, isMember ? 1 : 3)
+    }
+
+    /// The pooled logins, indented under a rule so they read as parts of the
+    /// row above rather than as accounts of their own.
+    private var memberList: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(account.members ?? []) { member in
+                AccountRow(account: member, showsDetail: showsDetail, isMember: true)
+            }
+        }
+        .padding(.leading, 8)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(.quaternary).frame(width: 1)
+        }
+        .padding(.top, 2)
+    }
+
+    /// "avg · 5" with a chevron. Names what the bars are, because an averaged
+    /// bar otherwise looks like one login that is barely used.
+    private var poolToggle: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) { showsMembers.toggle() }
+        } label: {
+            HStack(spacing: 3) {
+                Text("avg · \(account.members?.count ?? 0)")
+                    .font(.system(size: 9, weight: .medium))
+                    .monospacedDigit()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 7, weight: .semibold))
+                    .rotationEffect(.degrees(showsMembers ? 90 : 0))
+            }
+            .foregroundStyle(.secondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(showsMembers
+              ? "Hide the pooled accounts"
+              : "Bars average \(account.members?.count ?? 0) pooled accounts. Show each one.")
     }
 
     private var header: some View {
         HStack(spacing: 5) {
             Circle()
                 .fill(statusColor)
-                .frame(width: 6, height: 6)
+                .frame(width: isMember ? 5 : 6, height: isMember ? 5 : 6)
             Text(account.displayName)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: isMember ? 10 : 11, weight: isMember ? .medium : .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
             if let plan = account.plan {
                 Text(plan)
                     .font(.system(size: 9, weight: .medium))
@@ -63,6 +116,7 @@ struct AccountRow: View {
                     .background(.quaternary, in: Capsule())
             }
             Spacer(minLength: 0)
+            if account.isPool { poolToggle }
         }
         .help(account.email ?? account.displayName)
     }

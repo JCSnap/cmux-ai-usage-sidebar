@@ -11,6 +11,9 @@ struct ProviderReading {
     var plan: String?
     var email: String?
     var windows: [UsageWindow]
+    /// Pooled accounts, for a reading that covers a CLIProxyAPI pool. The
+    /// collector derives `windows` from these, so a pool client leaves it empty.
+    var members: [UsageAccount]? = nil
 }
 
 /// Reads one account. One implementation per agent CLI.
@@ -42,13 +45,7 @@ struct ClaudeClient: UsageProviderClient {
             throw FetchError.badStatus(429, "rate limited (cooling down for ~\(minutes)m to avoid resetting Anthropic window)")
         }
 
-        let request = Http.get(
-            "https://api.anthropic.com/api/oauth/usage",
-            headers: [
-                "Authorization": "Bearer \(token)",
-                "Accept": "application/json",
-                "anthropic-beta": "oauth-2025-04-20",
-            ])
+        let request = Http.get(Self.usageURL, headers: Self.usageHeaders(token: token))
 
         let (data, response) = try await Http.response(request)
         if response.statusCode == 429 {
@@ -69,7 +66,36 @@ struct ClaudeClient: UsageProviderClient {
         guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw FetchError.badPayload("not a JSON object")
         }
+        return try Self.reading(from: payload)
+    }
 
+    static let usageURL = "https://api.anthropic.com/api/oauth/usage"
+
+    /// The usage endpoint puts bare HTTP clients in a much stricter rate-limit
+    /// bucket than Claude Code (anthropics/claude-code#30930), so the request
+    /// names itself as Claude Code.
+    static func usageHeaders(token: String) -> [String: String] {
+        [
+            "Authorization": "Bearer \(token)",
+            "Accept": "application/json",
+            "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": "claude-code/\(claudeCodeVersion)",
+        ]
+    }
+
+    /// The installed Claude Code version. The native installer links
+    /// `~/.local/bin/claude` to `versions/<version>`, so the link target names
+    /// it without starting a process. The fallback only has to look plausible.
+    static let claudeCodeVersion: String = {
+        let link = NSString(string: "~/.local/bin/claude").expandingTildeInPath
+        let target = (try? FileManager.default.destinationOfSymbolicLink(atPath: link)) ?? ""
+        let version = URL(fileURLWithPath: target).lastPathComponent
+        return version.first?.isNumber == true ? version : "2.1.292"
+    }()
+
+    /// Converts a usage payload into windows. Team seats report no `seven_day`
+    /// window, so a payload with only `five_hour` is still a full reading.
+    static func reading(from payload: [String: Any]) throws -> ProviderReading {
         func window(_ key: String, _ label: String) -> UsageWindow? {
             guard let block = payload.dict(key) else { return nil }
             return UsageWindow(

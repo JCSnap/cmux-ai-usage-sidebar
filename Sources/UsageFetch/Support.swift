@@ -112,14 +112,17 @@ enum Http {
     }
 
     /// The vendor `Retry-After` in seconds when it sends a usable one, else one
-    /// second and then two. If `Retry-After` is larger than `retryCeiling`, returns
-    /// nil so the caller does not hammer an endpoint that requested a long cooldown.
+    /// second and then two. Returns nil, which stops the retries, when
+    /// `Retry-After` is zero or larger than `retryCeiling`.
     static func backoff(retryAfter: String?, attempt: Int) -> TimeInterval? {
         if let named = retryAfter
             .map({ $0.trimmingCharacters(in: .whitespaces) })
             .flatMap(TimeInterval.init) {
-            guard named <= retryCeiling else { return nil }
-            return max(named, 0)
+            // Anthropic answers a drained usage budget with `Retry-After: 0`
+            // (anthropics/claude-code#30930). Retrying at once only spends the
+            // next request of a budget that has not refilled.
+            guard named > 0, named <= retryCeiling else { return nil }
+            return named
         }
         return pow(2, Double(attempt - 1))
     }

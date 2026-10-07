@@ -162,7 +162,7 @@ The file lists one entry per account:
 
 ```json
 {
-  "configVersion": 1,
+  "configVersion": 2,
   "port": 47823,
   "refreshSeconds": 300,
   "accounts": [
@@ -194,6 +194,28 @@ service name of a second Claude account, run:
 ```bash
 security dump-keychain | grep -o '"Claude Code[^"]*"' | sort -u
 ```
+
+### CLIProxyAPI pools
+
+A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) pool is one
+account in the sidebar that stands for every login of one provider in the
+proxy. Set `cliProxyURL` to add one:
+
+```json
+{ "id": "cc3", "provider": "claude", "displayName": "cc3",
+  "cliProxyURL": "http://127.0.0.1:8317",
+  "cliProxyKeyFile": "~/.cli-proxy-api/management-key" }
+```
+
+- The daemon reads the management key from `cliProxyKeyFile`. That is also the
+  default path.
+- The daemon lists the logins with `GET /v0/management/auth-files`. It then
+  reads each login through `POST /v0/management/api-call`. The proxy inserts the
+  token, so the daemon never reads or refreshes a pooled token.
+- The bars show the average of the logins. Each reset time is the earliest one
+  in the pool. Click `avg · N` to show each login.
+- `claude` and `codex` pools are supported. Discovery proposes one pool for
+  each of them when the management key and an auth file of that provider exist.
 
 ## Verify
 

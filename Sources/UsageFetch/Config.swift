@@ -14,6 +14,13 @@ public struct AccountConfig: Codable, Sendable {
     public let grokHome: String?
     /// Antigravity: the `HOME` the account runs under.
     public let home: String?
+    /// CLIProxyAPI pool: base URL of the proxy, for example
+    /// `http://127.0.0.1:8317`. When set, the account is the pool of every
+    /// `provider` login the proxy holds, and the fields above are ignored.
+    public let cliProxyURL: String?
+    /// CLIProxyAPI pool: file that holds the management key. Defaults to
+    /// `~/.cli-proxy-api/management-key`.
+    public let cliProxyKeyFile: String?
 
     public init(
         id: String,
@@ -22,7 +29,9 @@ public struct AccountConfig: Codable, Sendable {
         keychainService: String? = nil,
         codexHome: String? = nil,
         grokHome: String? = nil,
-        home: String? = nil
+        home: String? = nil,
+        cliProxyURL: String? = nil,
+        cliProxyKeyFile: String? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -31,11 +40,16 @@ public struct AccountConfig: Codable, Sendable {
         self.codexHome = codexHome
         self.grokHome = grokHome
         self.home = home
+        self.cliProxyURL = cliProxyURL
+        self.cliProxyKeyFile = cliProxyKeyFile
     }
+
+    /// Whether this account reads a CLIProxyAPI pool rather than one login.
+    public var isCLIProxyPool: Bool { cliProxyURL != nil }
 }
 
 public struct Config: Codable, Sendable {
-    public static let currentVersion = 1
+    public static let currentVersion = 2
 
     public var configVersion: Int?
     public var port: UInt16
@@ -93,27 +107,48 @@ public struct Config: Codable, Sendable {
         return try encoder.encode(self)
     }
 
-    /// Existing configs predate Grok and intentionally win over discovery.
-    /// Apply only this versioned provider addition once, preserving every
-    /// existing account name and store choice.
+    /// Existing configs intentionally win over discovery. Each version adds
+    /// only the account kind it introduced, once, preserving every existing
+    /// account name and store choice: version 1 added Grok, version 2 added
+    /// CLIProxyAPI pools.
     @discardableResult
     mutating func migrateIfNeeded(discovered: [AccountConfig]) -> Bool {
-        guard (configVersion ?? 0) < Self.currentVersion else { return false }
+        let from = configVersion ?? 0
+        guard from < Self.currentVersion else { return false }
 
         var ids = Set(accounts.map(\.id))
-        for candidate in discovered where candidate.provider == .grok {
+        func uniqueID(_ base: String) -> String {
+            var id = base
+            var suffix = 2
+            while ids.contains(id) {
+                id = "\(base)-\(suffix)"
+                suffix += 1
+            }
+            ids.insert(id)
+            return id
+        }
+
+        if from < 2 {
+            for candidate in discovered where candidate.isCLIProxyPool {
+                let alreadyConfigured = accounts.contains {
+                    $0.isCLIProxyPool && $0.provider == candidate.provider
+                }
+                guard !alreadyConfigured else { continue }
+                let id = uniqueID(candidate.id)
+                accounts.append(AccountConfig(
+                    id: id, provider: candidate.provider, displayName: id,
+                    cliProxyURL: candidate.cliProxyURL,
+                    cliProxyKeyFile: candidate.cliProxyKeyFile))
+            }
+        }
+
+        for candidate in discovered where from < 1 && candidate.provider == .grok {
             let alreadyConfigured = accounts.contains {
                 $0.provider == .grok && $0.grokHome == candidate.grokHome
             }
             guard !alreadyConfigured else { continue }
 
-            var id = candidate.id
-            var suffix = 2
-            while ids.contains(id) {
-                id = "\(candidate.id)-\(suffix)"
-                suffix += 1
-            }
-            ids.insert(id)
+            let id = uniqueID(candidate.id)
             accounts.append(AccountConfig(
                 id: id,
                 provider: .grok,

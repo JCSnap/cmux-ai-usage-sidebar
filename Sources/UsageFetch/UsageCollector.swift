@@ -10,13 +10,21 @@ public struct UsageCollector: Sendable {
         .grok: GrokClient(),
         .antigravity: AntigravityClient(),
     ]
+    private let poolClient: any UsageProviderClient
+
+    /// `poolClient` is injectable so a test can stand in for the proxy.
+    init(poolClient: any UsageProviderClient) {
+        self.poolClient = poolClient
+    }
 
     /// How long numbers from a failed read stay on screen. Past this the row
     /// shows the failure instead, because a bar that never expires reads as
     /// live and is then worse than no bar at all.
     public static let staleLimit: TimeInterval = 24 * 60 * 60
 
-    public init() {}
+    public init() {
+        self.init(poolClient: CLIProxyClient())
+    }
 
     /// Reads every account. `previous` is the snapshot this one replaces; an
     /// account that fails now keeps its earlier numbers while they are fresh.
@@ -54,13 +62,16 @@ public struct UsageCollector: Sendable {
     private func read(
         _ account: AccountConfig, earlier: UsageAccount?, now: Date
     ) async -> UsageAccount {
-        guard let client = clients[account.provider] else {
+        guard let client = account.isCLIProxyPool ? poolClient : clients[account.provider] else {
             return Self.failed(
                 account, earlier: earlier, now: now,
                 detail: "no client for \(account.provider.rawValue)")
         }
         do {
             let reading = try await client.fetch(account)
+            if let members = reading.members {
+                return Self.pool(account, members: members, earlier: earlier, now: now)
+            }
             return UsageAccount(
                 id: account.id, provider: account.provider,
                 displayName: account.displayName, plan: reading.plan, email: reading.email,
@@ -75,22 +86,60 @@ public struct UsageCollector: Sendable {
         }
     }
 
+    /// Builds the row for a pool. Each member that failed keeps its recent
+    /// numbers, exactly as a lone account would, and the pool's bars are then
+    /// averaged over every member that still has numbers. The pool fails only
+    /// when no member has any.
+    static func pool(
+        _ account: AccountConfig, members: [UsageAccount], earlier: UsageAccount?, now: Date
+    ) -> UsageAccount {
+        let previous = Dictionary((earlier?.members ?? []).map { ($0.id, $0) }) { first, _ in first }
+        let merged = members.map { member in
+            member.state == .error
+                ? carriedOver(member, earlier: previous[member.id], now: now)
+                : member
+        }
+        let windows = CLIProxyClient.pooledWindows(merged)
+        guard !windows.isEmpty else {
+            let detail = merged.compactMap(\.detail).first ?? "no pooled account answered"
+            return failed(account, earlier: earlier, now: now, detail: detail, members: merged)
+        }
+        return UsageAccount(
+            id: account.id, provider: account.provider, displayName: account.displayName,
+            plan: CLIProxyClient.pooledPlan(merged), state: .ok, windows: windows,
+            updatedAt: now, members: merged)
+    }
+
+    /// A failed member read, with the member's earlier numbers when they are
+    /// recent enough to show.
+    static func carriedOver(_ member: UsageAccount, earlier: UsageAccount?, now: Date) -> UsageAccount {
+        guard let earlier, !earlier.windows.isEmpty, let read = earlier.updatedAt,
+              now.timeIntervalSince(read) < Self.staleLimit
+        else { return member }
+        return UsageAccount(
+            id: member.id, provider: member.provider, displayName: member.displayName,
+            plan: member.plan ?? earlier.plan, email: member.email ?? earlier.email,
+            state: .stale, windows: earlier.windows, detail: member.detail, updatedAt: read)
+    }
+
     /// Builds the row for a read that failed. Recent numbers from the previous
     /// snapshot are carried over as `.stale`, so one rate-limited call does not
     /// blank the panel until the next cycle. `updatedAt` stays at the last good
     /// read, so a run of failures ages out instead of renewing itself.
     static func failed(
-        _ account: AccountConfig, earlier: UsageAccount?, now: Date, detail: String
+        _ account: AccountConfig, earlier: UsageAccount?, now: Date, detail: String,
+        members: [UsageAccount]? = nil
     ) -> UsageAccount {
         if let earlier, !earlier.windows.isEmpty, let read = earlier.updatedAt,
            now.timeIntervalSince(read) < Self.staleLimit {
             return UsageAccount(
                 id: account.id, provider: account.provider,
                 displayName: account.displayName, plan: earlier.plan, email: earlier.email,
-                state: .stale, windows: earlier.windows, detail: detail, updatedAt: read)
+                state: .stale, windows: earlier.windows, detail: detail, updatedAt: read,
+                members: members ?? earlier.members)
         }
         return UsageAccount(
             id: account.id, provider: account.provider,
-            displayName: account.displayName, state: .error, detail: detail)
+            displayName: account.displayName, state: .error, detail: detail, members: members)
     }
 }

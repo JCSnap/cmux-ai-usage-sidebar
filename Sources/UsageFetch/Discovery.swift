@@ -25,6 +25,7 @@ public enum Discovery {
             + codexAccounts(directories: codexDirectories(home: home), home: home)
             + grokAccounts(directories: grokDirectories(home: home), home: home)
             + antigravityAccounts(homes: antigravityHomes(home: home), home: home)
+            + cliProxyAccounts(authDirectory: "\(home)/\(cliProxyDirectory)")
     }
 
     // MARK: - Claude Code
@@ -119,6 +120,37 @@ public enum Discovery {
                 provider: .antigravity,
                 displayName: numbered("antigravity", index),
                 home: tilde(path, home: home))
+        }
+    }
+
+    // MARK: - CLIProxyAPI
+
+    /// Where CLIProxyAPI keeps its auth files and, by the convention of its
+    /// setup, the management key.
+    static let cliProxyDirectory = ".cli-proxy-api"
+    static let cliProxyURL = "http://127.0.0.1:8317"
+
+    /// CLIProxyAPI names each auth file `<provider>-<hash>-<email>.json`. One
+    /// pool is proposed per provider the sidebar can meter, and only when the
+    /// management key is present, because the pool is read through the
+    /// management API.
+    static func cliProxyAccounts(authDirectory: String) -> [AccountConfig] {
+        let keyFile = "\(authDirectory)/management-key"
+        guard FileManager.default.fileExists(atPath: keyFile) else { return [] }
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: authDirectory)) ?? []
+        return cliProxyProviders(inFileNames: names).map { provider in
+            AccountConfig(
+                id: "\(provider.rawValue)-proxy",
+                provider: provider,
+                displayName: "\(provider.rawValue)-proxy",
+                cliProxyURL: cliProxyURL,
+                cliProxyKeyFile: "~/\(cliProxyDirectory)/management-key")
+        }
+    }
+
+    static func cliProxyProviders(inFileNames names: [String]) -> [UsageProvider] {
+        CLIProxyClient.supportedProviders.filter { provider in
+            names.contains { $0.hasPrefix("\(provider.rawValue)-") && $0.hasSuffix(".json") }
         }
     }
 

@@ -118,14 +118,32 @@ public struct UsageAccount: Codable, Sendable, Hashable, Identifiable {
     }
 }
 
+/// An account the user hid from the sidebar. The daemon does not read it, so
+/// it carries only what the panel needs to offer it back.
+public struct HiddenAccount: Codable, Sendable, Hashable, Identifiable {
+    public let id: String
+    public let provider: UsageProvider
+    public let displayName: String
+
+    public init(id: String, provider: UsageProvider, displayName: String) {
+        self.id = id
+        self.provider = provider
+        self.displayName = displayName
+    }
+}
+
 /// Everything the daemon knows, as served on the loopback port.
 public struct UsageSnapshot: Codable, Sendable, Hashable {
     public let generatedAt: Date
     public let accounts: [UsageAccount]
+    /// Accounts left out of `accounts` by the user. Nil from a daemon that
+    /// predates hiding.
+    public let hidden: [HiddenAccount]?
 
-    public init(generatedAt: Date, accounts: [UsageAccount]) {
+    public init(generatedAt: Date, accounts: [UsageAccount], hidden: [HiddenAccount]? = nil) {
         self.generatedAt = generatedAt
         self.accounts = accounts
+        self.hidden = hidden
     }
 
     public static let empty = UsageSnapshot(generatedAt: .distantPast, accounts: [])

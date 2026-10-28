@@ -55,17 +55,47 @@ public struct Config: Codable, Sendable {
     public var port: UInt16
     public var refreshSeconds: Int
     public var accounts: [AccountConfig]
+    /// Ids of accounts the sidebar leaves out. A hidden account is not read
+    /// either, so one that only answers 429 stops costing a request per cycle.
+    /// The account stays in `accounts`, so showing it again needs no rewrite.
+    public var hiddenAccounts: [String]?
 
     public init(
         configVersion: Int? = currentVersion,
         port: UInt16 = 47823,
         refreshSeconds: Int = 300,
-        accounts: [AccountConfig]
+        accounts: [AccountConfig],
+        hiddenAccounts: [String]? = nil
     ) {
         self.configVersion = configVersion
         self.port = port
         self.refreshSeconds = refreshSeconds
         self.accounts = accounts
+        self.hiddenAccounts = hiddenAccounts
+    }
+
+    public func isHidden(_ id: String) -> Bool { hiddenAccounts?.contains(id) ?? false }
+
+    /// The accounts the daemon reads and the sidebar lists, in config order.
+    public var visibleAccounts: [AccountConfig] { accounts.filter { !isHidden($0.id) } }
+
+    /// Hides or shows one account. Returns false when no account has that id,
+    /// so a typo never lands in the file.
+    @discardableResult
+    public mutating func setHidden(_ id: String, _ hidden: Bool) -> Bool {
+        guard accounts.contains(where: { $0.id == id }) else { return false }
+        var ids = (hiddenAccounts ?? []).filter { $0 != id }
+        if hidden { ids.append(id) }
+        hiddenAccounts = ids.isEmpty ? nil : ids
+        return true
+    }
+
+    /// Writes the config file, for a change made from the sidebar.
+    public func save(to path: String = Config.path) throws {
+        let url = URL(fileURLWithPath: path)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try encoded().write(to: url, options: .atomic)
     }
 
     public static let path = NSString(string: "~/.config/ai-usage/config.json").expandingTildeInPath
@@ -87,9 +117,7 @@ public struct Config: Codable, Sendable {
         let url = URL(fileURLWithPath: path)
         if !FileManager.default.fileExists(atPath: path) {
             let config = discovered()
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try config.encoded().write(to: url, options: .atomic)
+            try config.save()
             return config
         }
         var config = try JSONDecoder().decode(Config.self, from: Data(contentsOf: url))

@@ -8,6 +8,7 @@ struct UsagePanel: View {
     @State private var store = UsageStore()
     @State private var isExpanded = true
     @State private var showsDetail = false
+    @State private var showsHidden = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -94,7 +95,7 @@ struct UsagePanel: View {
 
     @ViewBuilder
     private var content: some View {
-        if store.snapshot.accounts.isEmpty {
+        if store.snapshot.accounts.isEmpty && (store.snapshot.hidden ?? []).isEmpty {
             emptyState
         } else {
             ScrollView {
@@ -108,13 +109,70 @@ struct UsagePanel: View {
                                     .foregroundStyle(.secondary)
                                     .textCase(.uppercase)
                                     .padding(.bottom, 2)
-                                ForEach(accounts) { AccountRow(account: $0, showsDetail: showsDetail) }
+                                ForEach(accounts) { account in
+                                    AccountRow(account: account, showsDetail: showsDetail)
+                                        .contextMenu {
+                                            Button("Hide \(account.displayName)") {
+                                                Task { await store.setHidden(account.id, true) }
+                                            }
+                                        }
+                                }
                             }
                         }
                     }
+                    hiddenList
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
+            }
+        }
+    }
+
+    /// "Hidden · N", collapsed. The only way back for an account hidden from
+    /// its context menu, short of editing the config file.
+    @ViewBuilder
+    private var hiddenList: some View {
+        let hidden = store.snapshot.hidden ?? []
+        if !hidden.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { showsHidden.toggle() }
+                } label: {
+                    HStack(spacing: 3) {
+                        Text("Hidden · \(hidden.count)")
+                            .font(.system(size: 9, weight: .semibold))
+                            .textCase(.uppercase)
+                            .monospacedDigit()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 7, weight: .semibold))
+                            .rotationEffect(.degrees(showsHidden ? 90 : 0))
+                    }
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                if showsHidden {
+                    ForEach(hidden) { account in
+                        HStack(spacing: 5) {
+                            Text(account.displayName)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text(account.provider.displayName)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                            Spacer(minLength: 0)
+                            Button("Show") {
+                                Task { await store.setHidden(account.id, false) }
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Color.accentColor)
+                            .disabled(store.isRefreshing)
+                        }
+                    }
+                }
             }
         }
     }

@@ -65,12 +65,22 @@ final class UsageStore {
 
     /// On-demand refresh: tells the daemon to collect fresh usage from all providers.
     func refresh() async {
+        await post(endpoint.appendingPathComponent("refresh"))
+    }
+
+    /// Hides or shows one account. The daemon keeps the choice in its config
+    /// file, because the sandbox gives the extension no file the daemon reads.
+    func setHidden(_ id: String, _ hidden: Bool) async {
+        await post(endpoint.appendingPathComponent(hidden ? "hide" : "show").appendingPathComponent(id))
+    }
+
+    private func post(_ url: URL) async {
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
 
         do {
-            var request = URLRequest(url: endpoint.appendingPathComponent("refresh"))
+            var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.cachePolicy = .reloadIgnoringLocalCacheData
             let (data, _) = try await session.data(for: request)

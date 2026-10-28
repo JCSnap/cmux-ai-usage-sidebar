@@ -26,7 +26,7 @@ public struct UsageCollector: Sendable {
         self.init(poolClient: CLIProxyClient())
     }
 
-    /// Reads every account. `previous` is the snapshot this one replaces; an
+    /// Reads every account that is not hidden. `previous` is the snapshot this one replaces; an
     /// account that fails now keeps its earlier numbers while they are fresh.
     public func collect(
         _ config: Config,
@@ -34,7 +34,7 @@ public struct UsageCollector: Sendable {
         now: Date = Date()
     ) async -> UsageSnapshot {
         let earlier = Dictionary(previous.accounts.map { ($0.id, $0) }) { first, _ in first }
-        let providerGroups = Dictionary(grouping: config.accounts.enumerated()) { $0.element.provider }
+        let providerGroups = Dictionary(grouping: config.visibleAccounts.enumerated()) { $0.element.provider }
         let accounts = await withTaskGroup(of: [(Int, UsageAccount)].self) { group in
             for (_, groupAccounts) in providerGroups {
                 group.addTask {
@@ -56,7 +56,23 @@ public struct UsageCollector: Sendable {
             // Restore configuration order; task completion order is arbitrary.
             return collected.sorted { $0.0 < $1.0 }.map(\.1)
         }
-        return UsageSnapshot(generatedAt: now, accounts: accounts)
+        return UsageSnapshot(generatedAt: now, accounts: accounts, hidden: Self.hidden(config))
+    }
+
+    /// `snapshot` with the accounts `config` now hides moved out, without a
+    /// read. Hiding should not call a vendor; showing again needs a refresh,
+    /// because a hidden account has no numbers to put back.
+    public static func applyingVisibility(_ config: Config, to snapshot: UsageSnapshot) -> UsageSnapshot {
+        UsageSnapshot(
+            generatedAt: snapshot.generatedAt,
+            accounts: snapshot.accounts.filter { !config.isHidden($0.id) },
+            hidden: hidden(config))
+    }
+
+    static func hidden(_ config: Config) -> [HiddenAccount] {
+        config.accounts.filter { config.isHidden($0.id) }.map {
+            HiddenAccount(id: $0.id, provider: $0.provider, displayName: $0.displayName)
+        }
     }
 
     private func read(

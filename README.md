@@ -23,6 +23,10 @@ when each window resets.
 A grey dot and "Not signed in" mark an account that has no valid credential.
 A bar turns orange above 50 percent and red above 80 percent.
 
+To hide an account, right-click its row and select Hide. A hidden account moves
+to a collapsed "Hidden · N" row at the end of the panel. Expand that row and
+click Show to bring the account back. See [Hide an account](#hide-an-account).
+
 ## Architecture
 
 The project has two components, because a cmux sidebar extension is sandboxed.
@@ -193,6 +197,33 @@ service name of a second Claude account, run:
 
 ```bash
 security dump-keychain | grep -o '"Claude Code[^"]*"' | sort -u
+```
+
+### Hide an account
+
+The sidebar hides an account through the daemon, because the sandboxed
+extension cannot write a file that the daemon reads. The daemon keeps the list in
+`hiddenAccounts` in `~/.config/ai-usage/config.json`, by account `id`:
+
+```json
+{
+  "accounts": [ ... ],
+  "hiddenAccounts": ["cc1", "grok"]
+}
+```
+
+- The daemon does not read a hidden account. An account that only answers
+  HTTP 429 therefore stops using a request each cycle.
+- The account stays in `accounts`, with its name and credential store. To show
+  it again, click Show in the sidebar, or remove its id from `hiddenAccounts`
+  and restart the daemon.
+- The list survives a daemon restart and a reinstall of the app or the daemon,
+  because both scripts keep the config file.
+- Other tools can do the same over loopback: `POST /hide/<id>` and
+  `POST /show/<id>` save the change and return the new snapshot.
+
+```bash
+curl -s -X POST http://127.0.0.1:47823/hide/cc1 > /dev/null
 ```
 
 ### CLIProxyAPI pools

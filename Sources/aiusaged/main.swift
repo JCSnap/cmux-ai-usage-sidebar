@@ -12,11 +12,11 @@ import UsageModels
 final class UsageServer: @unchecked Sendable {
     private let store: SnapshotStore
     private let listener: NWListener
-    private let onRefresh: (@Sendable () async -> Data)?
+    private let onRequest: (@Sendable (DaemonRequest) async -> Data)?
 
-    init(port: UInt16, store: SnapshotStore, onRefresh: (@Sendable () async -> Data)? = nil) throws {
+    init(port: UInt16, store: SnapshotStore, onRequest: (@Sendable (DaemonRequest) async -> Data)? = nil) throws {
         self.store = store
-        self.onRefresh = onRefresh
+        self.onRequest = onRequest
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .init(rawValue: port)!)
         parameters.allowLocalEndpointReuse = true
@@ -32,17 +32,18 @@ final class UsageServer: @unchecked Sendable {
 
     private func handle(_ connection: NWConnection) {
         connection.start(queue: .global())
-        // Read the request line to determine whether a full on-demand refresh was requested.
+        // Read the request line to learn whether it asks for a refresh or a
+        // visibility change rather than the current snapshot.
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] content, _, _, _ in
             guard let self else { return }
             Task {
                 let requestLine = content.flatMap { data in
                     String(data: data, encoding: .utf8)?.components(separatedBy: "\r\n").first
                 } ?? ""
-                let isRefresh = requestLine.hasPrefix("POST") || requestLine.contains("/refresh")
+                let request = DaemonRequest(requestLine: requestLine)
                 let body: Data
-                if isRefresh, let onRefresh = self.onRefresh {
-                    body = await onRefresh()
+                if request != .snapshot, let onRequest = self.onRequest {
+                    body = await onRequest(request)
                 } else {
                     body = await self.store.body()
                 }
@@ -103,7 +104,7 @@ if arguments.contains("--once") {
 actor RefreshCoordinator {
     private let store: SnapshotStore
     private let collector: UsageCollector
-    private let config: Config
+    private var config: Config
     private var inFlight: Task<Data, Never>?
     private var lastRefresh: Date = .distantPast
 
@@ -132,6 +133,36 @@ actor RefreshCoordinator {
         lastRefresh = Date()
         return result
     }
+
+    /// Hides or shows one account and saves the choice to the config file, so
+    /// it survives a restart. Hiding drops the row at once; showing reads the
+    /// accounts again, because a hidden account has no numbers to put back.
+    func setHidden(_ id: String, _ hidden: Bool) async -> Data {
+        var changed = config
+        guard changed.setHidden(id, hidden), changed.isHidden(id) != config.isHidden(id) else {
+            return await store.body()
+        }
+        do {
+            try changed.save()
+        } catch {
+            FileHandle.standardError.write(Data("aiusaged: could not save \(Config.path): \(error)\n".utf8))
+            return await store.body()
+        }
+        config = changed
+        if hidden {
+            await store.update(UsageCollector.applyingVisibility(config, to: await store.snapshot()))
+            return await store.body()
+        }
+        return await refresh(force: true)
+    }
+
+    func handle(_ request: DaemonRequest) async -> Data {
+        switch request {
+        case .snapshot: await store.body()
+        case .refresh: await refresh()
+        case let .setHidden(id, hidden): await setHidden(id, hidden)
+        }
+    }
 }
 
 // Complete the first provider refresh before opening the port. Otherwise the
@@ -141,12 +172,12 @@ let cached = SnapshotStore.loadCache() ?? .empty
 let snapshot = await collector.collect(config, previous: cached)
 let store = SnapshotStore(initial: snapshot, cachePath: Config.cachePath)
 let coordinator = RefreshCoordinator(store: store, collector: collector, config: config)
-let server = try UsageServer(port: config.port, store: store, onRefresh: {
-    await coordinator.refresh()
+let server = try UsageServer(port: config.port, store: store, onRequest: { request in
+    await coordinator.handle(request)
 })
 server.start()
 FileHandle.standardError.write(Data(
-    "aiusaged: serving \(config.accounts.count) accounts on 127.0.0.1:\(config.port)\n".utf8))
+    "aiusaged: serving \(config.visibleAccounts.count) accounts on 127.0.0.1:\(config.port)\n".utf8))
 
 // Sleep first. The snapshot above is one cycle old at most, so collecting again
 // here would call every vendor twice within a second of start.

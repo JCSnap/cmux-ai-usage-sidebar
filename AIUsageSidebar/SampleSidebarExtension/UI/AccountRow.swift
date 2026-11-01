@@ -40,11 +40,16 @@ struct AccountRow: View {
                                 .textCase(.uppercase)
                                 .lineLimit(1)
                         }
-                        ForEach(group.windows) { UsageMeter(window: $0, showsReset: showsDetail) }
+                        ForEach(group.windows) { window in
+                            UsageMeter(
+                                window: window, showsReset: showsDetail,
+                                sourceDescription: account.isPool
+                                    ? "\(account.reportingMemberCount(for: window))/\(memberCount) accounts reporting \(window.label)"
+                                    : nil)
+                        }
                     }
                 }
                 if account.state == .stale { staleNote }
-                if showsMembers { memberList }
             case .signedOut:
                 Text("Not signed in")
                     .font(.system(size: 10))
@@ -54,8 +59,14 @@ struct AccountRow: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.red.opacity(0.8))
                     .lineLimit(2)
-                if showsMembers { memberList }
             }
+            if account.isPool, missingMemberCount > 0 {
+                Text("\(missingMemberCount) not reporting")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+                    .help("Missing and stale readings are excluded from the average. Expand the pool for details.")
+            }
+            if showsMembers { memberList }
         }
         .padding(.vertical, isMember ? 1 : 3)
     }
@@ -75,14 +86,16 @@ struct AccountRow: View {
         .padding(.top, 2)
     }
 
-    /// "avg · 5" with a chevron. Names what the bars are, because an averaged
-    /// bar otherwise looks like one login that is barely used.
+    private var memberCount: Int { account.members?.count ?? 0 }
+    private var missingMemberCount: Int { memberCount - account.reportingMemberCount() }
+
+    /// Show how many logins supplied fresh readings out of the whole pool.
     private var poolToggle: some View {
         Button {
             withAnimation(.easeInOut(duration: 0.15)) { showsMembers.toggle() }
         } label: {
             HStack(spacing: 3) {
-                Text("avg · \(account.members?.count ?? 0)")
+                Text("avg · \(account.reportingMemberCount())/\(memberCount)")
                     .font(.system(size: 9, weight: .medium))
                     .monospacedDigit()
                 Image(systemName: "chevron.right")
@@ -95,7 +108,7 @@ struct AccountRow: View {
         .buttonStyle(.plain)
         .help(showsMembers
               ? "Hide the pooled accounts"
-              : "Bars average \(account.members?.count ?? 0) pooled accounts. Show each one.")
+              : "\(account.reportingMemberCount()) of \(memberCount) accounts have fresh readings. Each bar averages accounts reporting that window. Show each account.")
     }
 
     private var header: some View {

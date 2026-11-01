@@ -102,10 +102,8 @@ public struct UsageCollector: Sendable {
         }
     }
 
-    /// Builds the row for a pool. Each member that failed keeps its recent
-    /// numbers, exactly as a lone account would, and the pool's bars are then
-    /// averaged over every member that still has numbers. The pool fails only
-    /// when no member has any.
+    /// Keep recent history on failed members. Average only fresh readings.
+    /// Without fresh readings, the pool shows an error instead of an average.
     static func pool(
         _ account: AccountConfig, members: [UsageAccount], earlier: UsageAccount?, now: Date
     ) -> UsageAccount {
@@ -146,6 +144,17 @@ public struct UsageCollector: Sendable {
         _ account: AccountConfig, earlier: UsageAccount?, now: Date, detail: String,
         members: [UsageAccount]? = nil
     ) -> UsageAccount {
+        if account.isCLIProxyPool {
+            let failedMembers = members ?? earlier?.members?.map { member in
+                let failure = UsageAccount(
+                    id: member.id, provider: member.provider, displayName: member.displayName,
+                    plan: member.plan, email: member.email, state: .error, detail: detail)
+                return carriedOver(failure, earlier: member, now: now)
+            }
+            return UsageAccount(
+                id: account.id, provider: account.provider, displayName: account.displayName,
+                state: .error, detail: detail, members: failedMembers)
+        }
         if let earlier, !earlier.windows.isEmpty, let read = earlier.updatedAt,
            now.timeIntervalSince(read) < Self.staleLimit {
             return UsageAccount(

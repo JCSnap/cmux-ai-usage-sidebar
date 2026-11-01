@@ -7,6 +7,7 @@ struct UsageMeter: View {
     /// When true the row also states when the window resets. The tooltip says
     /// the same thing, so this is the always-visible form of that detail.
     var showsReset = false
+    var sourceDescription: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
@@ -52,8 +53,9 @@ struct UsageMeter: View {
     private var clampedFraction: Double { max(0, min(1, window.usedFraction)) }
 
     private var helpText: String {
-        guard let reset = resetText else { return "\(window.usedPercent)% used" }
-        return "\(window.usedPercent)% used · \(reset)"
+        let usage = "\(window.usedPercent)% used"
+        let reading = resetText.map { "\(usage) · \($0)" } ?? usage
+        return sourceDescription.map { "\(reading)\n\($0)" } ?? reading
     }
 
     private var resetText: String? {

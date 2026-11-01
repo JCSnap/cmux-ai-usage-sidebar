@@ -243,8 +243,13 @@ proxy. Set `cliProxyURL` to add one:
 - The daemon lists the logins with `GET /v0/management/auth-files`. It then
   reads each login through `POST /v0/management/api-call`. The proxy inserts the
   token, so the daemon never reads or refreshes a pooled token.
-- The bars show the average of the logins. Each reset time is the earliest one
-  in the pool. Click `avg · N` to show each login.
+- Each bar averages fresh readings for that window, including accounts at 100%.
+  Its reset time is the earliest among those readings.
+- `avg · 3/7` means three of seven enabled accounts report fresh usage.
+  Hover over a bar to see its contributor count. Click the count to show each login.
+- The collapsed pool shows how many accounts are not reporting. Stale readings
+  remain on individual accounts for up to 24 hours, but never enter the average.
+  If no account reports fresh usage, the pool shows an error without average bars.
 - `claude` and `codex` pools are supported. Discovery proposes one pool for
   each of them when the management key and an auth file of that provider exist.
 

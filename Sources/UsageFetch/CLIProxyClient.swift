@@ -66,14 +66,13 @@ struct CLIProxyClient: UsageProviderClient {
 
     // MARK: - Pool arithmetic
 
-    /// The pool's bars: for each window, the mean of the members that report
-    /// it. The proxy spreads traffic across the pool, so the mean is the share
-    /// of the pool's capacity in use. The reset is the earliest one, because
-    /// that is when the pool next gains headroom.
+    /// Average each window over fresh readings, including accounts at 100%.
+    /// Missing and stale readings contribute neither usage nor capacity.
+    /// The reset is the earliest among that window's contributors.
     static func pooledWindows(_ members: [UsageAccount]) -> [UsageWindow] {
         var order: [String] = []
         var buckets: [String: [UsageWindow]] = [:]
-        for member in members where member.showsWindows {
+        for member in members where member.state == .ok {
             for window in member.windows {
                 if buckets[window.id] == nil { order.append(window.id) }
                 buckets[window.id, default: []].append(window)

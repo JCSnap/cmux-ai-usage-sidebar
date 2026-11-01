@@ -75,10 +75,8 @@ public struct UsageAccount: Codable, Sendable, Hashable, Identifiable {
     /// When `windows` were read from the vendor. A `.stale` account keeps the
     /// time of its last good read, so the panel can say how old the bars are.
     public let updatedAt: Date?
-    /// The accounts behind a CLIProxyAPI pool, for example the five Claude
-    /// logins that serve `cc3`. Nil for an ordinary account. The pool's own
-    /// `windows` are the average of these, so the row reads as one account
-    /// until the user expands it.
+    /// The enabled logins behind a CLIProxyAPI pool. Nil for an ordinary account.
+    /// The pool's windows average only members with fresh readings.
     public let members: [UsageAccount]?
 
     public init(
@@ -107,6 +105,16 @@ public struct UsageAccount: Codable, Sendable, Hashable, Identifiable {
 
     /// Whether this row stands for a pool of accounts rather than one login.
     public var isPool: Bool { members?.isEmpty == false }
+
+    /// Count fresh readings, optionally for one window. A full quota still counts.
+    public func reportingMemberCount(for window: UsageWindow? = nil) -> Int {
+        guard state == .ok else { return 0 }
+        return (members ?? []).filter { member in
+            guard member.state == .ok else { return false }
+            if let window { return member.windows.contains { $0.id == window.id } }
+            return !member.windows.isEmpty
+        }.count
+    }
 
     /// Whether the row has numbers to draw. A stale account still does; its
     /// bars are simply older than one refresh cycle.

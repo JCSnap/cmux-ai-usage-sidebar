@@ -102,12 +102,12 @@ private actor RequestLog {
     #expect(windows[1].usedFraction == 0.5)
 }
 
-@Test func staleMembersStillCountTowardThePool() {
+@Test func staleMembersDoNotCountTowardTheLivePoolAverage() {
     let members = [
         member("a", windows: [UsageWindow(label: "5h", usedFraction: 0.1)]),
         member("b", state: .stale, windows: [UsageWindow(label: "5h", usedFraction: 0.3)]),
     ]
-    #expect(abs(CLIProxyClient.pooledWindows(members)[0].usedFraction - 0.2) < 1e-9)
+    #expect(CLIProxyClient.pooledWindows(members)[0].usedFraction == 0.1)
 }
 
 @Test func aPoolHasAPlanOnlyWhenEveryMemberSharesIt() {
@@ -254,7 +254,98 @@ private struct StubPool: UsageProviderClient {
     #expect(row.state == .ok)
     #expect(row.members?.map(\.state) == [.ok, .stale])
     #expect(row.members?[1].updatedAt == now.addingTimeInterval(-600))
-    #expect(abs(row.windows[0].usedFraction - 0.3) < 1e-9)
+    #expect(row.windows[0].usedFraction == 0.1)
+}
+
+@Test func aFullyFailedPoolKeepsMemberHistoryButHasNoAverage() {
+    let earlier = UsageCollector.pool(pool, members: [
+        member("a", windows: [UsageWindow(label: "5h", usedFraction: 0.2)]),
+        member("b", windows: [UsageWindow(label: "5h", usedFraction: 0.8)]),
+    ], earlier: nil, now: now)
+    let row = UsageCollector.pool(pool, members: [
+        member("a", state: .error, windows: []),
+        member("b", state: .error, windows: []),
+    ], earlier: earlier, now: now.addingTimeInterval(300))
+
+    #expect(row.state == .error)
+    #expect(row.windows.isEmpty)
+    #expect(row.members?.map(\.state) == [.stale, .stale])
+    #expect(row.members?.map(\.updatedAt) == [now, now])
+}
+
+@Test func aProxyOutageMarksCachedMembersStaleAndExpiresOnlyTheirReadings() {
+    let earlier = UsageCollector.pool(pool, members: [
+        member("a", windows: [UsageWindow(label: "5h", usedFraction: 0.2)]),
+        member("b", windows: [UsageWindow(label: "5h", usedFraction: 0.8)]),
+    ], earlier: nil, now: now)
+    let failed = UsageCollector.failed(
+        pool, earlier: earlier, now: now.addingTimeInterval(300), detail: "proxy offline")
+    #expect(failed.state == .error)
+    #expect(failed.windows.isEmpty)
+    #expect(failed.members?.map(\.state) == [.stale, .stale])
+    #expect(failed.members?.map(\.detail) == ["proxy offline", "proxy offline"])
+    #expect(failed.members?.map(\.updatedAt) == [now, now])
+
+    let expired = UsageCollector.failed(
+        pool, earlier: failed, now: now.addingTimeInterval(UsageCollector.staleLimit + 1),
+        detail: "proxy offline")
+    #expect(expired.members?.map(\.state) == [.error, .error])
+    #expect(expired.members?.allSatisfy { $0.windows.isEmpty } == true)
+    #expect(expired.members?.map(\.id) == earlier.members?.map(\.id))
+}
+
+@Test func recoveredMembersRejoinThePoolAverage() {
+    let failed = UsageCollector.pool(pool, members: [
+        member("a", state: .error, windows: []),
+        member("b", state: .error, windows: []),
+    ], earlier: nil, now: now)
+    let row = UsageCollector.pool(pool, members: [
+        member("a", windows: [UsageWindow(label: "5h", usedFraction: 1)]),
+        member("b", windows: [UsageWindow(label: "5h", usedFraction: 0.2)]),
+    ], earlier: failed, now: now.addingTimeInterval(300))
+    #expect(row.state == .ok)
+    #expect(row.windows.first?.usedFraction == 0.6)
+    #expect(row.members?.map(\.state) == [.ok, .ok])
+}
+
+@Test func poolReportingCountsIncludeFullQuotasButExcludeMissingReadings() {
+    let row = UsageCollector.pool(pool, members: [
+        member("a", windows: [UsageWindow(label: "5h", usedFraction: 1)]),
+        member("b", windows: [UsageWindow(label: "5h", usedFraction: 1)]),
+        member("c", windows: [UsageWindow(label: "5h", usedFraction: 0.04)]),
+        member("d", state: .stale, windows: [UsageWindow(label: "5h", usedFraction: 0.3)]),
+        member("e", state: .error, windows: []),
+        member("f", state: .signedOut, windows: []),
+        member("g", windows: []),
+    ], earlier: nil, now: now)
+
+    #expect(row.members?.count == 7)
+    #expect(row.reportingMemberCount() == 3)
+    #expect(row.windows.first?.usedPercent == 68)
+}
+
+@Test func poolReportingCountsFollowEachWindow() {
+    let fiveHour = UsageWindow(label: "5h", usedFraction: 0.2)
+    let weekly = UsageWindow(label: "7d", usedFraction: 0.6)
+    let row = UsageCollector.pool(pool, members: [
+        member("a", windows: [fiveHour, weekly]),
+        member("b", windows: [fiveHour]),
+    ], earlier: nil, now: now)
+
+    #expect(row.reportingMemberCount() == 2)
+    #expect(row.reportingMemberCount(for: fiveHour) == 2)
+    #expect(row.reportingMemberCount(for: weekly) == 1)
+}
+
+@Test func anOldStalePoolSnapshotNeverClaimsItsMembersAreReporting() {
+    // Older daemons left members marked ok when the proxy connection failed.
+    let row = UsageAccount(
+        id: "cc3", provider: .claude, displayName: "cc3", state: .stale,
+        windows: [UsageWindow(label: "5h", usedFraction: 0.2)],
+        updatedAt: now, members: [
+            member("a", windows: [UsageWindow(label: "5h", usedFraction: 0.2)]),
+        ])
+    #expect(row.reportingMemberCount() == 0)
 }
 
 @Test func aPoolWithNoAnsweringMemberIsAnErrorThatStillListsItsMembers() {

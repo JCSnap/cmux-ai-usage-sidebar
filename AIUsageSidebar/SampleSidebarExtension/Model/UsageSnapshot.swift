@@ -116,6 +116,45 @@ public struct UsageAccount: Codable, Sendable, Hashable, Identifiable {
         }.count
     }
 
+    /// How much of a pool window frees up as its members reset, at most two marks.
+    ///
+    /// Each member that reports `window` freshly counts toward the average, as
+    /// in the pool bar. A member frees its share, `usedFraction / count`, when
+    /// its window resets. Members that reset in the same minute add together.
+    /// A member without a reset time stays in the count but frees nothing.
+    /// A reset that has already passed counts as freeing now.
+    ///
+    /// The first mark is the earliest reset that frees at least one whole
+    /// percent. The second is the last reset, which frees everything. An
+    /// empty result means no reset frees a whole percent.
+    public func headroomGains(for window: UsageWindow, now: Date = .now) -> [HeadroomGain] {
+        guard state == .ok else { return [] }
+        let windows = (members ?? []).compactMap { member -> UsageWindow? in
+            guard member.state == .ok else { return nil }
+            return member.windows.first { $0.id == window.id }
+        }
+        guard !windows.isEmpty else { return [] }
+        let share = 1 / Double(windows.count)
+        // Keyed by whole minute, so resets a few seconds apart read as one.
+        var freed: [Int: (at: Date, fraction: Double)] = [:]
+        for member in windows {
+            guard let resetsAt = member.resetsAt else { continue }
+            let at = max(now, resetsAt)
+            let minute = Int((at.timeIntervalSince(now) / 60).rounded(.up))
+            let earlier = freed[minute] ?? (at, 0)
+            freed[minute] = (max(earlier.at, at), earlier.fraction + max(0, min(1, member.usedFraction)) * share)
+        }
+        var total = 0.0
+        let cumulative = freed.keys.sorted().compactMap { minute -> HeadroomGain? in
+            guard let step = freed[minute] else { return nil }
+            total += step.fraction
+            return HeadroomGain(at: step.at, fraction: total)
+        }
+        guard let first = cumulative.first(where: { $0.percent >= 1 }),
+              let last = cumulative.last else { return [] }
+        return first.at == last.at ? [first] : [first, last]
+    }
+
     /// Whether the row has numbers to draw. A stale account still does; its
     /// bars are simply older than one refresh cycle.
     public var showsWindows: Bool { state == .ok || state == .stale }
@@ -123,6 +162,20 @@ public struct UsageAccount: Codable, Sendable, Hashable, Identifiable {
     /// The window that is closest to its limit. Drives the one-line summary.
     public var worstWindow: UsageWindow? {
         windows.max { $0.usedFraction < $1.usedFraction }
+    }
+}
+
+/// Pool headroom that is free again by `at`, as a fraction of the pool.
+public struct HeadroomGain: Sendable, Hashable {
+    public let at: Date
+    public let fraction: Double
+
+    /// Whole percent of the pool, as the pool bar rounds it.
+    public var percent: Int { Int((fraction * 100).rounded()) }
+
+    public init(at: Date, fraction: Double) {
+        self.at = at
+        self.fraction = fraction
     }
 }
 

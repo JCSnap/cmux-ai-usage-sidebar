@@ -45,6 +45,9 @@ struct AccountRow: View {
                                 window: window, showsReset: showsDetail,
                                 sourceDescription: account.isPool
                                     ? "\(account.reportingMemberCount(for: window))/\(memberCount) accounts reporting \(window.label)"
+                                    : nil,
+                                headroom: account.isPool
+                                    ? account.headroomGains(for: window)
                                     : nil)
                         }
                     }

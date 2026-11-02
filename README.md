@@ -245,8 +245,9 @@ proxy. Set `cliProxyURL` to add one:
   token, so the daemon never reads or refreshes a pooled token.
 - Each bar averages fresh readings for that window, including accounts at 100%.
 - With the clock on, a pool bar shows how much of the pool frees up instead of
-  one reset time, for example `+3% in 51m · +19% by 4h 41m`. The first mark is
-  the earliest reset that frees at least 1%. The last mark is the full window.
+  one reset time, for example `+3% 1h · +11% 2h · +16% 3h · +19% 5h`. Each mark
+  is the cumulative share freed by that hour, or by that day for a weekly window.
+  A mark that adds nothing is left out. The line wraps when it is too long.
 - `avg · 3/7` means three of seven enabled accounts report fresh usage.
   Hover over a bar to see its contributor count. Click the count to show each login.
 - The collapsed pool shows how many accounts are not reporting. Stale readings

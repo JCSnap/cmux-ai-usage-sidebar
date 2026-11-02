@@ -487,29 +487,56 @@ private func fiveHour(_ used: Double, resetsIn seconds: TimeInterval?) -> [Usage
     [UsageWindow(label: "5h", usedFraction: used, resetsAt: seconds.map { now.addingTimeInterval($0) })]
 }
 
-@Test func headroomAddsMembersThatResetTogetherAndEndsAtTheLastReset() {
+@Test func headroomShowsCumulativeHourlyMarksAndSkipsFlatHours() {
     let account = pool([
-        member("a", windows: fiveHour(0.4, resetsIn: 3600)),
-        member("b", windows: fiveHour(0.2, resetsIn: 3600)),
-        member("c", windows: fiveHour(0.8, resetsIn: 4 * 3600)),
+        member("a", windows: fiveHour(0.4, resetsIn: 40 * 60)),
+        member("b", windows: fiveHour(0.2, resetsIn: 50 * 60)),
+        member("c", windows: fiveHour(0.8, resetsIn: 3.5 * 3600)),
         member("d", windows: fiveHour(0.0, resetsIn: 2 * 3600)),
     ])
 
     let gains = account.headroomGains(for: account.windows[0], now: now)
 
-    // a and b share a reset: (0.4 + 0.2) / 4. Then c adds 0.8 / 4.
+    // a and b free by 1h: (0.4 + 0.2) / 4. 2h and 3h add nothing. c lands by 4h.
+    #expect(gains.map(\.label) == ["1h", "4h"])
     #expect(gains.map(\.percent) == [15, 35])
     #expect(gains.map(\.at) == [now.addingTimeInterval(3600), now.addingTimeInterval(4 * 3600)])
     // The full gain equals the pool bar, so the two never disagree.
     #expect(gains.last?.percent == account.windows[0].usedPercent)
 }
 
-@Test func headroomSkipsResetsThatFreeLessThanOnePercent() {
+@Test func headroomFillsEveryHourThatFreesMore() {
     let account = pool([
-        member("a", windows: fiveHour(0.001, resetsIn: 600)),
-        member("b", windows: fiveHour(0.5, resetsIn: 3600)),
+        member("a", windows: fiveHour(0.4, resetsIn: 30 * 60)),
+        member("b", windows: fiveHour(0.4, resetsIn: 90 * 60)),
+        member("c", windows: fiveHour(0.4, resetsIn: 150 * 60)),
+        member("d", windows: fiveHour(0.4, resetsIn: 270 * 60)),
     ])
     let gains = account.headroomGains(for: account.windows[0], now: now)
+    #expect(gains.map(\.label) == ["1h", "2h", "3h", "5h"])
+    #expect(gains.map(\.percent) == [10, 20, 30, 40])
+}
+
+@Test func headroomUsesDayMarksForAWeeklyWindow() {
+    let weekly = { (used: Double, days: Double) in
+        [UsageWindow(label: "7d", usedFraction: used, resetsAt: now.addingTimeInterval(days * 86_400))]
+    }
+    let account = pool([
+        member("a", windows: weekly(0.5, 0.5)),
+        member("b", windows: weekly(0.5, 2.5)),
+    ])
+    let gains = account.headroomGains(for: account.windows[0], now: now)
+    #expect(gains.map(\.label) == ["1d", "3d"])
+    #expect(gains.map(\.percent) == [25, 50])
+}
+
+@Test func headroomSkipsLeadingMarksBelowOnePercent() {
+    let account = pool([
+        member("a", windows: fiveHour(0.001, resetsIn: 600)),
+        member("b", windows: fiveHour(0.5, resetsIn: 7200)),
+    ])
+    let gains = account.headroomGains(for: account.windows[0], now: now)
+    #expect(gains.map(\.label) == ["2h"])
     #expect(gains.map(\.percent) == [25])
 }
 
@@ -531,6 +558,7 @@ private func fiveHour(_ used: Double, resetsIn seconds: TimeInterval?) -> [Usage
         member("d", state: .error, windows: []),
     ])
     let gains = account.headroomGains(for: account.windows[0], now: now)
+    #expect(gains.map(\.label) == ["now"])
     #expect(gains.map(\.percent) == [20])
     #expect(gains.first?.at == now)
 }

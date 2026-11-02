@@ -47,6 +47,9 @@ struct UsageMeter: View {
             if showsReset, let reset = resetText {
                 Text(reset)
                     .font(.system(size: 9))
+                    // Hourly pool marks can outgrow the row. Wrap them rather
+                    // than truncate, so no mark is hidden.
+                    .fixedSize(horizontal: false, vertical: true)
                     .foregroundStyle(.tertiary)
                     .padding(.leading, 32)
             }
@@ -68,16 +71,10 @@ struct UsageMeter: View {
         return "resets \(Self.compactInterval(until: resetsAt))"
     }
 
-    /// Formats pool gains as "+6% in 1h · +16% by 4h 20m". Nil when nothing frees.
-    static func headroomText(_ gains: [HeadroomGain], from now: Date = .now) -> String? {
+    /// Formats pool gains as "+3% 1h · +11% 2h · +19% 5h". Nil when nothing frees.
+    static func headroomText(_ gains: [HeadroomGain]) -> String? {
         guard !gains.isEmpty else { return nil }
-        return gains.enumerated().map { index, gain in
-            let interval = compactInterval(until: gain.at, from: now)
-            let when = index == 0 || interval == "now"
-                ? interval
-                : "by " + interval.replacingOccurrences(of: "in ", with: "")
-            return "+\(gain.percent)% \(when)"
-        }.joined(separator: " · ")
+        return gains.map { "+\($0.percent)% \($0.label)" }.joined(separator: " · ")
     }
 
     /// Formats a countdown as "in 4h 20m".

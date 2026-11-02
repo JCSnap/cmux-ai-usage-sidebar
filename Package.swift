@@ -11,11 +11,16 @@ let package = Package(
         // Credential access and provider HTTP. Daemon-only.
         .library(name: "UsageFetch", targets: ["UsageFetch"]),
         .executable(name: "aiusaged", targets: ["aiusaged"]),
+        // Sets CLIProxyAPI routing weights from the daemon snapshot.
+        .executable(name: "aiusage", targets: ["aiusage"]),
     ],
     targets: [
         .target(name: "UsageModels"),
         .target(name: "UsageFetch", dependencies: ["UsageModels"]),
         .executableTarget(name: "aiusaged", dependencies: ["UsageFetch", "UsageModels"]),
+        .target(name: "ProxySteer", dependencies: ["UsageModels"]),
+        .executableTarget(name: "aiusage", dependencies: ["ProxySteer", "UsageModels"]),
         .testTarget(name: "UsageFetchTests", dependencies: ["UsageFetch", "UsageModels"]),
+        .testTarget(name: "ProxySteerTests", dependencies: ["ProxySteer", "UsageModels"]),
     ]
 )

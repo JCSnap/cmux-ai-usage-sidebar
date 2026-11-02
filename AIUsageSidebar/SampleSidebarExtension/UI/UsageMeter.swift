@@ -9,6 +9,10 @@ struct UsageMeter: View {
     var showsReset = false
     var sourceDescription: String? = nil
 
+    /// Set for a pool. Its members reset at different times, so one reset
+    /// time misleads. The row states how much headroom frees up instead.
+    var headroom: [HeadroomGain]? = nil
+
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 6) {
@@ -59,8 +63,21 @@ struct UsageMeter: View {
     }
 
     private var resetText: String? {
+        if let headroom { return Self.headroomText(headroom) }
         guard let resetsAt = window.resetsAt else { return nil }
         return "resets \(Self.compactInterval(until: resetsAt))"
+    }
+
+    /// Formats pool gains as "+6% in 1h · +16% by 4h 20m". Nil when nothing frees.
+    static func headroomText(_ gains: [HeadroomGain], from now: Date = .now) -> String? {
+        guard !gains.isEmpty else { return nil }
+        return gains.enumerated().map { index, gain in
+            let interval = compactInterval(until: gain.at, from: now)
+            let when = index == 0 || interval == "now"
+                ? interval
+                : "by " + interval.replacingOccurrences(of: "in ", with: "")
+            return "+\(gain.percent)% \(when)"
+        }.joined(separator: " · ")
     }
 
     /// Formats a countdown as "in 4h 20m".

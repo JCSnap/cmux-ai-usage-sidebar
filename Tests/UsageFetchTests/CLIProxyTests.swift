@@ -474,3 +474,63 @@ private struct StubPool: UsageProviderClient {
     #expect(reading.windows.map(\.label) == ["5h"])
     #expect(reading.windows[0].usedPercent == 12)
 }
+
+// MARK: - Pool headroom
+
+private func pool(_ members: [UsageAccount]) -> UsageAccount {
+    UsageAccount(
+        id: "cc3", provider: .claude, displayName: "cc3", state: .ok,
+        windows: CLIProxyClient.pooledWindows(members), updatedAt: now, members: members)
+}
+
+private func fiveHour(_ used: Double, resetsIn seconds: TimeInterval?) -> [UsageWindow] {
+    [UsageWindow(label: "5h", usedFraction: used, resetsAt: seconds.map { now.addingTimeInterval($0) })]
+}
+
+@Test func headroomAddsMembersThatResetTogetherAndEndsAtTheLastReset() {
+    let account = pool([
+        member("a", windows: fiveHour(0.4, resetsIn: 3600)),
+        member("b", windows: fiveHour(0.2, resetsIn: 3600)),
+        member("c", windows: fiveHour(0.8, resetsIn: 4 * 3600)),
+        member("d", windows: fiveHour(0.0, resetsIn: 2 * 3600)),
+    ])
+
+    let gains = account.headroomGains(for: account.windows[0], now: now)
+
+    // a and b share a reset: (0.4 + 0.2) / 4. Then c adds 0.8 / 4.
+    #expect(gains.map(\.percent) == [15, 35])
+    #expect(gains.map(\.at) == [now.addingTimeInterval(3600), now.addingTimeInterval(4 * 3600)])
+    // The full gain equals the pool bar, so the two never disagree.
+    #expect(gains.last?.percent == account.windows[0].usedPercent)
+}
+
+@Test func headroomSkipsResetsThatFreeLessThanOnePercent() {
+    let account = pool([
+        member("a", windows: fiveHour(0.001, resetsIn: 600)),
+        member("b", windows: fiveHour(0.5, resetsIn: 3600)),
+    ])
+    let gains = account.headroomGains(for: account.windows[0], now: now)
+    #expect(gains.map(\.percent) == [25])
+}
+
+@Test func headroomIsEmptyWhenNothingIsUsed() {
+    let account = pool([
+        member("a", windows: fiveHour(0, resetsIn: 600)),
+        member("b", windows: fiveHour(0, resetsIn: 3600)),
+    ])
+    #expect(account.headroomGains(for: account.windows[0], now: now).isEmpty)
+}
+
+@Test func headroomCountsAPassedResetAsNowAndSkipsMissingResets() {
+    let account = pool([
+        member("a", windows: fiveHour(0.4, resetsIn: -120)),
+        // No reset time: it stays in the average but frees nothing.
+        member("b", windows: fiveHour(0.6, resetsIn: nil)),
+        // Stale and failed members are outside the average, as in the bar.
+        member("c", state: .stale, windows: fiveHour(0.9, resetsIn: 600)),
+        member("d", state: .error, windows: []),
+    ])
+    let gains = account.headroomGains(for: account.windows[0], now: now)
+    #expect(gains.map(\.percent) == [20])
+    #expect(gains.first?.at == now)
+}

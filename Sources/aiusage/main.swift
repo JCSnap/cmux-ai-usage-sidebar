@@ -3,13 +3,16 @@ import ProxySteer
 import UsageModels
 
 let usage = """
-usage: aiusage proxy-steer [--dry-run] [--pool ID]
+usage: aiusage proxy-steer [--dry-run] [--pool ID] [--basis weekly|tightest]
 
 Sets each CLIProxyAPI pool login's routing weight from the aiusaged snapshot.
 Logins that reset soon with headroom left get more new sessions. The proxy
 must use `strategy: weighted-round-robin` for weights to matter.
   --dry-run   print the planned weights and change nothing
   --pool ID   pool account id in ~/.config/ai-usage/config.json (default cc3)
+  --basis B   weekly: weekly headroom per hour to the weekly reset drives the
+              weight; the 5-hour window only gates it (default)
+              tightest: the fullest window and the soonest reset drive it
 
 The daemon port, proxy URL and management key file come from that config.
 
@@ -49,6 +52,7 @@ arguments.removeFirst()
 
 var dryRun = false
 var poolID = "cc3"
+var basis = SteerWeight.Basis.weekly
 while let argument = arguments.first {
     arguments.removeFirst()
     switch argument {
@@ -57,6 +61,12 @@ while let argument = arguments.first {
         guard let next = arguments.first else { fail("--pool needs a value") }
         arguments.removeFirst()
         poolID = next
+    case "--basis":
+        guard let next = arguments.first, let value = SteerWeight.Basis(rawValue: next) else {
+            fail("--basis needs weekly or tightest")
+        }
+        arguments.removeFirst()
+        basis = value
     case "--help", "-h": print(usage); exit(0)
     default: fail("unknown option \(argument)\n\(usage)")
     }
@@ -86,7 +96,7 @@ do {
     request.timeoutInterval = 10
     let snapshot = try UsageSnapshot.decoder().decode(UsageSnapshot.self, from: try await get(request))
     let entries = ProxySteer.authEntries(fromListing: try await get(ProxySteer.listRequest(base: proxyURL, key: key)))
-    rows = try ProxySteer.plan(snapshot: snapshot, poolID: poolID, entries: entries, now: Date())
+    rows = try ProxySteer.plan(snapshot: snapshot, poolID: poolID, entries: entries, now: Date(), basis: basis)
 } catch {
     fail("\(error is ProxySteer.PlanError ? "\(error)" : error.localizedDescription); no change")
 }

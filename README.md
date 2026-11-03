@@ -263,17 +263,28 @@ lost if the proxy does not spend it first. `aiusage proxy-steer` sets each
 login's routing weight from the daemon snapshot:
 
 ```bash
-./scripts/install-proxy-steer.sh        # pool cc3, every 5 minutes
-aiusage proxy-steer --dry-run           # print the planned weights
+./scripts/install-proxy-steer.sh                 # pool cc3, every 5 minutes, basis weekly
+./scripts/install-proxy-steer.sh --basis tightest
+aiusage proxy-steer --dry-run                    # print the planned weights
 ```
 
 - Set `routing.strategy: "weighted-round-robin"` in the proxy config. Other
   strategies ignore weights. Credential `priority` still wins: only the highest
   priority tier gets traffic, so leave priorities equal.
-- `weight = 250 × headroom / hours until reset`, clamped to 1...1000.
+- `--basis weekly` is the default. Weekly headroom is the scarce resource, so
+  the weekly window drives the weight:
+  - `weight = 5000 × weekly free share / hours to weekly reset`, at least 5 hours.
+  - The 5-hour window is a gate. At 90% or more used the login gets 1.
+    Below that the weight is multiplied by `(0.90 − used) / 0.90`.
+  - A login whose week-to-date burn rate would spend its weekly headroom before
+    the reset is damped by `free / projected use`. The rate is trusted only
+    after 24 hours of the week have passed.
+  - A login at 95% or more of its weekly window gets 1. A login with no weekly
+    window, such as a team seat, uses the tightest rule.
+- `--basis tightest` is the older rule: `weight = 250 × headroom / hours until reset`.
   `headroom` is the free share of the fullest window. `hours` is the time to the
-  soonest reset, at least 15 minutes.
-- A login at 95% or more of any window, or one that answered HTTP 429, gets 1.
+  soonest reset, at least 15 minutes. A login at 95% or more of any window gets 1.
+- Weights are clamped to 1...1000. A login that answered HTTP 429 gets 1.
 - A login without a fresh reading keeps its weight. A snapshot older than 15
   minutes changes nothing.
 - Weights are set with `PATCH /v0/management/auth-files/fields`. The proxy saves

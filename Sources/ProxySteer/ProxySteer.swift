@@ -59,7 +59,8 @@ public enum ProxySteer {
     /// One row per pool member, matched to a login of the pool's provider by
     /// email. A member with no login, or no fresh reading, gets no new weight.
     public static func plan(
-        snapshot: UsageSnapshot, poolID: String, entries: [AuthEntry], now: Date
+        snapshot: UsageSnapshot, poolID: String, entries: [AuthEntry], now: Date,
+        basis: SteerWeight.Basis = .weekly
     ) throws -> [Row] {
         let age = now.timeIntervalSince(snapshot.generatedAt)
         guard age <= maxSnapshotAge else { throw PlanError.staleSnapshot(ageSeconds: Int(age)) }
@@ -77,7 +78,7 @@ public enum ProxySteer {
             guard let entry = byEmail[email.lowercased()] else {
                 return Row(email: email, name: nil, currentWeight: nil, newWeight: nil, reason: "no proxy login")
             }
-            switch SteerWeight.decide(member, now: now) {
+            switch SteerWeight.decide(member, now: now, basis: basis) {
             case .weight(let weight, let reason):
                 return Row(email: email, name: entry.name, currentWeight: entry.weight, newWeight: weight, reason: reason)
             case .keep(let reason):

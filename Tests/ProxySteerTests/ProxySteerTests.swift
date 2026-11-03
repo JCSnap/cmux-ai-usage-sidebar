@@ -19,7 +19,58 @@ private func member(
         state: state, windows: windows, detail: detail)
 }
 
-// MARK: - Weight rule
+// MARK: - Weekly weight rule
+
+/// `used` and `hours` list the 5-hour window first, then the weekly window.
+@Test(arguments: [
+    // Free weekly headroom near its reset, idle 5h window: 5000 * 0.47 / 48 = 49.
+    ([0.0, 0.53], [Double?.some(5), .some(48)],
+     SteerWeight.Decision.weight(49, reason: "weekly 47% free, reset in 48.0h, 5h 0% used")),
+    // The 5-hour window scales the weight by (0.90 - used) / 0.90.
+    ([0.45, 0.53], [Double?.some(5), .some(48)],
+     .weight(24, reason: "weekly 47% free, reset in 48.0h, 5h 45% used")),
+    // The 5-hour gate.
+    ([0.90, 0.10], [Double?.some(1), .some(10)], .weight(1, reason: "5h 90% used")),
+    ([0.20, 0.95], [Double?.some(1), .some(10)], .weight(1, reason: "weekly 95% used")),
+    // A burn rate that spends the headroom before the reset is damped:
+    // 0.72 used in 60h projects 1.30 over 108h, so x 0.28 / 1.30.
+    ([0.30, 0.72], [Double?.some(2), .some(108)],
+     .weight(2, reason: "weekly 28% free, reset in 108.0h, 5h 30% used, burn x0.22")),
+    // Under 24h into the week the burn rate is not trusted.
+    ([0.0, 0.30], [Double?.some(5), .some(150)],
+     .weight(23, reason: "weekly 70% free, reset in 150.0h, 5h 0% used")),
+    // A weekly reset under 5h uses the 5-hour floor.
+    ([0.0, 0.0], [Double?.some(1), .some(1)], .weight(1000, reason: "weekly 100% free, reset in 5.0h, 5h 0% used")),
+    // No weekly reset time: a full week away.
+    ([0.0, 0.0], [Double?.some(1), .none], .weight(30, reason: "weekly 100% free, reset in 168.0h, 5h 0% used")),
+    // A team seat with no weekly window falls back to the tightest rule.
+    ([0.5], [Double?.some(1)], .weight(125, reason: "50% free, reset in 1.0h")),
+])
+func weeklyRule(used: [Double], hours: [Double?], expected: SteerWeight.Decision) {
+    #expect(SteerWeight.decide(member("a@x", used: used, resetsIn: hours), now: now, basis: .weekly) == expected)
+}
+
+/// Live numbers from 2026-11-03. Under the tightest rule alice got 2 because
+/// her 5-hour window was idle, while bob, busy in his 5-hour window, got 31.
+@Test func weeklyHeadroomResettingSoonOutweighsBusyFiveHourWindow() {
+    let alice = member("alice@x", used: [0.0, 0.53], resetsIn: [5, 48])
+    let bob = member("bob@x", used: [0.75, 0.09], resetsIn: [1.2, 163])
+    guard case .weight(let aliceWeight, _) = SteerWeight.decide(alice, now: now),
+          case .weight(let bobWeight, _) = SteerWeight.decide(bob, now: now)
+    else { Issue.record("expected weights"); return }
+    #expect(aliceWeight > bobWeight)
+    #expect(aliceWeight == 49)
+    #expect(bobWeight == 5)
+}
+
+@Test func basisDefaultsToWeekly() {
+    let alice = member("alice@x", used: [0.0, 0.53], resetsIn: [5, 48])
+    #expect(SteerWeight.decide(alice, now: now) == SteerWeight.decide(alice, now: now, basis: .weekly))
+    #expect(SteerWeight.Basis(rawValue: "tightest") == .tightest)
+    #expect(SteerWeight.Basis(rawValue: "soonest") == nil)
+}
+
+// MARK: - Tightest weight rule
 
 @Test(arguments: [
     // used, hours until reset, expected
@@ -37,13 +88,13 @@ private func member(
     // No reset time: treated as a week away, clamped to the minimum.
     ([0.0], [Double?.none], .weight(1, reason: "100% free, reset in 168.0h")),
 ])
-func weightRule(used: [Double], hours: [Double?], expected: SteerWeight.Decision) {
-    #expect(SteerWeight.decide(member("a@x", used: used, resetsIn: hours), now: now) == expected)
+func tightestRule(used: [Double], hours: [Double?], expected: SteerWeight.Decision) {
+    #expect(SteerWeight.decide(member("a@x", used: used, resetsIn: hours), now: now, basis: .tightest) == expected)
 }
 
 @Test func soonerResetWithEqualHeadroomWeighsMore() {
-    let soon = SteerWeight.decide(member("a@x", used: [0.4], resetsIn: [1]), now: now)
-    let late = SteerWeight.decide(member("b@x", used: [0.4], resetsIn: [4]), now: now)
+    let soon = SteerWeight.decide(member("a@x", used: [0.4], resetsIn: [1]), now: now, basis: .tightest)
+    let late = SteerWeight.decide(member("b@x", used: [0.4], resetsIn: [4]), now: now, basis: .tightest)
     guard case .weight(let soonWeight, _) = soon, case .weight(let lateWeight, _) = late else {
         Issue.record("expected weights"); return
     }
@@ -58,7 +109,9 @@ func weightRule(used: [Double], hours: [Double?], expected: SteerWeight.Decision
     (.signedOut, nil, .keep(reason: "no fresh reading (signedOut)")),
 ] as [(UsageAccountState, String?, SteerWeight.Decision)])
 func unreadableMembers(state: UsageAccountState, detail: String?, expected: SteerWeight.Decision) {
-    #expect(SteerWeight.decide(member("a@x", state: state, detail: detail), now: now) == expected)
+    for basis in SteerWeight.Basis.allCases {
+        #expect(SteerWeight.decide(member("a@x", state: state, detail: detail), now: now, basis: basis) == expected)
+    }
 }
 
 // MARK: - Plan
@@ -84,7 +137,7 @@ private let entries = [
             member("c@x", used: [0.1], resetsIn: [1]),
             member("d@x", used: [0.1], resetsIn: [1]),
         ]),
-        poolID: "cc3", entries: entries, now: now)
+        poolID: "cc3", entries: entries, now: now, basis: .tightest)
     #expect(rows == [
         .init(email: "a@x", name: "claude-a.json", currentWeight: 7, newWeight: 125, reason: "50% free, reset in 1.0h"),
         .init(email: "b@x", name: "claude-b.json", currentWeight: nil, newWeight: nil, reason: "no fresh reading (stale)"),
@@ -93,6 +146,14 @@ private let entries = [
         .init(email: "d@x", name: nil, currentWeight: nil, newWeight: nil, reason: "no proxy login"),
     ])
     #expect(rows.map(\.needsUpdate) == [true, false, false, false])
+}
+
+@Test func planPassesTheBasisThrough() throws {
+    let snap = snapshot(age: 60, members: [member("a@x", used: [0.0, 0.53], resetsIn: [5, 48])])
+    let weekly = try ProxySteer.plan(snapshot: snap, poolID: "cc3", entries: entries, now: now)
+    let tightest = try ProxySteer.plan(snapshot: snap, poolID: "cc3", entries: entries, now: now, basis: .tightest)
+    #expect(weekly.map(\.newWeight) == [49])
+    #expect(tightest.map(\.newWeight) == [24])
 }
 
 @Test func matchingListedWeightNeedsNoUpdate() {

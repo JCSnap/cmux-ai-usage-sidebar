@@ -17,11 +17,13 @@ struct CLIProxyClient: UsageProviderClient {
     static let defaultKeyFile = "~/.cli-proxy-api/management-key"
     /// Cooldown after a 429 that names no usable `Retry-After`.
     static let defaultCooldown: TimeInterval = 300
+    /// Loopback may forward to a busy remote host through an SSH tunnel.
+    static let requestTimeout: TimeInterval = 60
 
     typealias Send = @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
 
-    /// The proxy is on loopback, so a failed call is not retried here. A
-    /// relayed vendor 429 is answered with a cooldown instead.
+    /// Send once. Retrying a slow relay can duplicate upstream calls.
+    /// A relayed vendor 429 starts a cooldown instead.
     var send: Send = { try await Http.once($0) }
     var cooldowns: CooldownTracker = .shared
     var now: @Sendable () -> Date = { Date() }
@@ -97,8 +99,9 @@ struct CLIProxyClient: UsageProviderClient {
     // MARK: - Management API
 
     func authEntries(base: String, key: String) async throws -> [AuthEntry] {
-        let request = Http.get(
+        var request = Http.get(
             "\(base)/v0/management/auth-files", headers: ["Authorization": "Bearer \(key)"])
+        request.timeoutInterval = Self.requestTimeout
         let (data, response) = try await send(request)
         guard (200..<300).contains(response.statusCode) else {
             throw FetchError.badStatus(response.statusCode, String(decoding: data, as: UTF8.self))
@@ -153,6 +156,7 @@ struct CLIProxyClient: UsageProviderClient {
                 "header": upstream.allHTTPHeaderFields ?? [:],
             ])
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = Self.requestTimeout
         return request
     }
 

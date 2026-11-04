@@ -46,6 +46,16 @@ a provisioning profile that a personal team does not get. An outgoing loopback
 socket is the one channel that works with `network.client` alone. The extension
 therefore never holds a token.
 
+Manual refresh starts a background collection and returns the current snapshot.
+The extension polls locally until collection finishes. Repeated refresh requests
+share that collection. Cached timestamps and stale states stay unchanged until
+new readings arrive.
+The `X-Usage-Refreshing` response header stays `true` while collection runs.
+
+CLIProxyAPI calls have a 60-second timeout because a loopback URL can forward to
+a remote host. Pool members are read sequentially. Slow calls are not retried,
+and vendor rate-limit cooldowns still apply.
+
 No credential and no usage figure leaves your machine, except in the request
 that each agent vendor already receives from its own CLI.
 
@@ -219,8 +229,9 @@ extension cannot write a file that the daemon reads. The daemon keeps the list i
   and restart the daemon.
 - The list survives a daemon restart and a reinstall of the app or the daemon,
   because both scripts keep the config file.
-- Other tools can do the same over loopback: `POST /hide/<id>` and
-  `POST /show/<id>` save the change and return the new snapshot.
+- Other tools can use `POST /hide/<id>` and `POST /show/<id>` over loopback.
+  Hiding returns the updated snapshot. Showing starts a background collection
+  and returns the current snapshot until fresh readings arrive.
 
 ```bash
 curl -s -X POST http://127.0.0.1:47823/hide/cc1 > /dev/null

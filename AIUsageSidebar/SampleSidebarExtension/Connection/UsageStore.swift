@@ -83,9 +83,20 @@ final class UsageStore {
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.cachePolicy = .reloadIgnoringLocalCacheData
-            let (data, _) = try await session.data(for: request)
+            let (data, response) = try await session.data(for: request)
             snapshot = try UsageSnapshot.decoder().decode(UsageSnapshot.self, from: data)
             health = .live
+            // A refresh can outlast one HTTP request. Poll the local snapshot
+            // while the daemon collects, without repeating upstream requests.
+            var collecting = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-Usage-Refreshing") == "true"
+            while collecting {
+                try await Task.sleep(for: .seconds(2))
+                var poll = URLRequest(url: endpoint)
+                poll.cachePolicy = .reloadIgnoringLocalCacheData
+                let (latest, status) = try await session.data(for: poll)
+                snapshot = try UsageSnapshot.decoder().decode(UsageSnapshot.self, from: latest)
+                collecting = (status as? HTTPURLResponse)?.value(forHTTPHeaderField: "X-Usage-Refreshing") == "true"
+            }
         } catch {
             health = .unreachable(error.localizedDescription)
         }

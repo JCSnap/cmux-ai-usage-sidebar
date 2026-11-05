@@ -343,6 +343,27 @@ aiusage proxy-steer --dry-run                    # print the planned weights
   the weights.
 - The log at `~/Library/Logs/ai-usage/proxy-steer.log` shows emails and weights only.
 
+### Count running agent sessions
+
+`scripts/claude-sessions` counts the running Claude Code and Codex sessions on
+one machine, per user. The status line calls it with `--json` on each machine,
+so the status line and the table always agree. It runs on macOS and Linux.
+
+```bash
+install -m 755 scripts/claude-sessions ~/.local/bin/claude-sessions
+claude-sessions          # running counts per user, then one row per session
+claude-sessions --json   # the same, for the status line
+```
+
+- A session is a `claude` or `codex` process. Daemons, bg-pty-hosts, MCP and
+  app servers, and the Codex node launcher do not count.
+- A session of the current user with a record in `~/.claude*/sessions/` is
+  running when the record says `busy`. `idle`, `waiting` and `shell` are idle.
+- Other sessions are running when their process tree used 0.15 CPU seconds in a
+  3-second sample. This covers other users' sessions and Codex.
+- A firstmate lead is listed, but the counts leave it out.
+- The script only lists processes. It does not read another user's home folder.
+
 ## Verify
 
 List the accounts this machine has:
@@ -444,6 +465,7 @@ Sources/UsageModels     wire types, shared by both sides
 Sources/UsageFetch      credential access and provider HTTP
 Sources/aiusaged        refresh loop and loopback server
 AIUsageSidebar/         Xcode project: containing app + sidebar extension
+scripts/                install and helper scripts
 skills/                 setup skill for an AI agent
 vendor/CmuxExtensionKit copy of the cmux extension SDK
 ```

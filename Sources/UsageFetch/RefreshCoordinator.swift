@@ -19,17 +19,30 @@ public actor RefreshCoordinator {
     private var refreshAgain = false
     private let now: @Sendable () -> Date
     private let saveConfig: @Sendable (Config) throws -> Void
+    /// Where the daily pool ledger lives. Nil keeps no ledger.
+    private let poolDayPath: String?
+    private var poolDay: PoolDayLedger
 
     public init(
         store: SnapshotStore, collector: UsageCollector, config: Config,
         now: @escaping @Sendable () -> Date = { Date() },
-        saveConfig: @escaping @Sendable (Config) throws -> Void = { try $0.save() }
+        saveConfig: @escaping @Sendable (Config) throws -> Void = { try $0.save() },
+        poolDayPath: String? = nil
     ) {
         self.store = store
         self.collector = collector
         self.config = config
         self.now = now
         self.saveConfig = saveConfig
+        self.poolDayPath = poolDayPath
+        self.poolDay = poolDayPath.flatMap { PoolDayLedger.load(from: $0) } ?? PoolDayLedger()
+    }
+
+    /// Adds one collection to the daily pool ledger. It reads no vendor API.
+    private func recordPoolDay(_ snapshot: UsageSnapshot) {
+        guard let poolDayPath else { return }
+        poolDay = poolDay.updated(with: snapshot, at: now())
+        poolDay.save(to: poolDayPath)
     }
 
     /// Start one collection. HTTP callers receive the current snapshot immediately.
@@ -40,6 +53,7 @@ public actor RefreshCoordinator {
         inFlight = Task {
             let prev = await store.snapshot()
             let newSnapshot = await collector.collect(collectingConfig, previous: prev)
+            recordPoolDay(newSnapshot)
             // A visibility change made during collection must survive completion.
             await store.update(UsageCollector.applyingVisibility(config, to: newSnapshot))
             lastRefresh = now()

@@ -59,19 +59,27 @@ public struct Config: Codable, Sendable {
     /// either, so one that only answers 429 stops costing a request per cycle.
     /// The account stays in `accounts`, so showing it again needs no rewrite.
     public var hiddenAccounts: [String]?
+    /// Per pool id, a command whose output is a proxy-steer log from a machine
+    /// that is always on, for example
+    /// `["/usr/bin/ssh", "jcjustin@devbox", "tail -n 4000 ~/Library/Logs/ai-usage/proxy-steer.log"]`.
+    /// The daemon runs it only when today's pool ledger does not start at
+    /// midnight, so a late start still counts the burn from 00:00.
+    public var poolDaySeeds: [String: [String]]?
 
     public init(
         configVersion: Int? = currentVersion,
         port: UInt16 = 47823,
         refreshSeconds: Int = 300,
         accounts: [AccountConfig],
-        hiddenAccounts: [String]? = nil
+        hiddenAccounts: [String]? = nil,
+        poolDaySeeds: [String: [String]]? = nil
     ) {
         self.configVersion = configVersion
         self.port = port
         self.refreshSeconds = refreshSeconds
         self.accounts = accounts
         self.hiddenAccounts = hiddenAccounts
+        self.poolDaySeeds = poolDaySeeds
     }
 
     public func isHidden(_ id: String) -> Bool { hiddenAccounts?.contains(id) ?? false }

@@ -96,8 +96,15 @@ if arguments.contains("--once") {
 // A first install still waits for real readings instead of serving an empty placeholder.
 let cached = SnapshotStore.loadCache()
 let store = SnapshotStore(initial: cached ?? .empty, cachePath: Config.cachePath)
+// Reads the always-on machine's log when today's pool ledger misses midnight.
+let seeds = config.poolDaySeeds ?? [:]
+@Sendable func readSeed(_ pool: String) async -> String? {
+    guard let argv = seeds[pool] else { return nil }
+    return await CommandOutput.run(argv)
+}
 let coordinator = RefreshCoordinator(
-    store: store, collector: collector, config: config, poolDayPath: PoolDayLedger.path)
+    store: store, collector: collector, config: config, poolDayPath: PoolDayLedger.path,
+    poolDaySeed: seeds.isEmpty ? nil : readSeed)
 await coordinator.refresh(force: true)
 if cached == nil { await coordinator.waitForRefresh() }
 let server = try UsageServer(port: config.port, onRequest: { request in

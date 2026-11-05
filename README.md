@@ -279,15 +279,31 @@ A status line can read this file instead of calling a usage endpoint.
   One login going from 0% to 100% is one account.
 - `breakEvenAccountsPerDay` is `memberCount / 7`, the rate at which the pool
   refills. A day above it spends headroom faster than it comes back.
-- The day is the local calendar day. The first reading of the day is each
-  login's baseline.
+- The day starts at local midnight. Each login's baseline is its reading
+  nearest to and not after midnight.
+- A daemon that ran in the half hour before midnight uses its own last reading.
+- A daemon that missed midnight, because it started late or the laptop slept,
+  rebuilds the day from a log that an always-on machine writes. Set
+  `poolDaySeeds` to a command that prints that machine's proxy-steer log:
+
+  ```json
+  "poolDaySeeds": { "cc3": ["/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+    "jcjustin@devbox", "tail -n 4000 ~/Library/Logs/ai-usage/proxy-steer.log"] }
+  ```
+
+  The daemon takes each login's latest logged weekly reading at or before
+  midnight, up to 12 hours back. It then replays the logged readings after
+  midnight. `weekly 100% used` counts as 1.00. Lines without a weekly figure,
+  such as a 5-hour gate or a failed read, are skipped. The command runs only
+  while the day is not covered, at most once every 30 minutes, and never calls
+  a usage endpoint.
 - A weekly reset inside the day adds the rise before the reset. The new window
   then counts from zero.
 - A login without a fresh reading keeps its last value. `partial` is then true
   and `missing` names the login.
-- `since` is when the first baseline of the day was taken. If the daemon was not
-  running at midnight, the burn before `since` is not counted. `coversDay` is
-  false when `since` is more than 15 minutes after midnight.
+- `coversDay` is true when every login's baseline is at most 15 minutes after
+  midnight. `since` is then midnight. Otherwise `since` is the latest baseline,
+  and the burn before it is not counted.
 - Usage between the last reading before a reset and the reset is not counted.
 
 ### Steer a pool toward logins that reset soon

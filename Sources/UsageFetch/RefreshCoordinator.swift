@@ -22,12 +22,18 @@ public actor RefreshCoordinator {
     /// Where the daily pool ledger lives. Nil keeps no ledger.
     private let poolDayPath: String?
     private var poolDay: PoolDayLedger
+    /// Reads the seed log for one pool id, or nil when none is set or it failed.
+    private let poolDaySeed: (@Sendable (String) async -> String?)?
+    private var lastSeedAttempt: [String: Date] = [:]
+    /// A failed or partial seed is tried again after this long.
+    static let seedRetry: TimeInterval = 30 * 60
 
     public init(
         store: SnapshotStore, collector: UsageCollector, config: Config,
         now: @escaping @Sendable () -> Date = { Date() },
         saveConfig: @escaping @Sendable (Config) throws -> Void = { try $0.save() },
-        poolDayPath: String? = nil
+        poolDayPath: String? = nil,
+        poolDaySeed: (@Sendable (String) async -> String?)? = nil
     ) {
         self.store = store
         self.collector = collector
@@ -36,11 +42,27 @@ public actor RefreshCoordinator {
         self.saveConfig = saveConfig
         self.poolDayPath = poolDayPath
         self.poolDay = poolDayPath.flatMap { PoolDayLedger.load(from: $0) } ?? PoolDayLedger()
+        self.poolDaySeed = poolDaySeed
     }
 
     /// Adds one collection to the daily pool ledger. It reads no vendor API.
-    private func recordPoolDay(_ snapshot: UsageSnapshot) {
+    ///
+    /// When today's entry does not start at midnight, it first rebuilds the day
+    /// from the seed log, at most once per `seedRetry`.
+    private func recordPoolDay(_ snapshot: UsageSnapshot) async {
         guard let poolDayPath else { return }
+        if let poolDaySeed {
+            for pool in snapshot.accounts where pool.isPool {
+                let at = now()
+                guard !poolDay.coversToday(pool.id, at: at),
+                      lastSeedAttempt[pool.id].map({ at.timeIntervalSince($0) >= Self.seedRetry }) ?? true
+                else { continue }
+                lastSeedAttempt[pool.id] = at
+                guard let log = await poolDaySeed(pool.id) else { continue }
+                poolDay = poolDay.backfilled(
+                    pool.id, from: LoggedReading.parseProxySteerLog(log), at: now())
+            }
+        }
         poolDay = poolDay.updated(with: snapshot, at: now())
         poolDay.save(to: poolDayPath)
     }
@@ -53,7 +75,7 @@ public actor RefreshCoordinator {
         inFlight = Task {
             let prev = await store.snapshot()
             let newSnapshot = await collector.collect(collectingConfig, previous: prev)
-            recordPoolDay(newSnapshot)
+            await recordPoolDay(newSnapshot)
             // A visibility change made during collection must survive completion.
             await store.update(UsageCollector.applyingVisibility(config, to: newSnapshot))
             lastRefresh = now()

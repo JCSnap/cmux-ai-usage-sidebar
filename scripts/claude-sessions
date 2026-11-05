@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""Count the running Claude Code and Codex sessions on this machine, per user.
+
+The gate-governor status bar calls `claude-sessions --json` on each machine, so the
+bar and this table always use the same rule.
+
+What counts as a session:
+  - A process whose program is `claude` or `codex`.
+  - Not a helper: the Claude daemon, a bg-pty-host, the `claude agents` manager, the
+    Chrome native host, MCP servers, and the Codex app server.
+  - Not the node launcher of Codex. Only its native binary counts.
+  - A bg-spare process counts. The Claude daemon keeps spare sessions, and a spare keeps
+    its `bg-spare` name after a background session claims it. A spare that nobody has
+    claimed uses no CPU, so it is always idle.
+  - A firstmate lead (a session whose folder is a firstmate home root) is a supervisor.
+    The table shows it with KIND lead, but the counts leave it out.
+
+Which rule decides running or idle (the RULE column names it per row):
+  - `status`: a Claude session of the current user that has a record in
+    ~/.claude*/sessions/<pid>.json. The record's `status` field decides. `busy` means a
+    turn is in progress, so the session is running. `idle`, `waiting` (blocked on a
+    permission or input prompt) and `shell` (idle, with only a background shell job
+    left) mean idle. A record marked `spare` is a spare that nobody claimed: idle.
+  - `cpu`: every other session. That covers other users' sessions, whose home folder this
+    script never reads, Codex sessions, and Claude sessions with no record. The session
+    is running when it and its child processes used at least THRESHOLD CPU seconds in a
+    SAMPLE-second sample. The script takes the sample only when a row needs it.
+
+The script only lists processes. It never reads another user's home folder and never
+signals a process.
+
+Usage:
+  claude-sessions            per-user running counts, then one row per session
+  claude-sessions --json     the same, as JSON for the status bar
+  claude-sessions --self-test
+
+Environment: CLAUDE_SESSIONS_SAMPLE (seconds, default 3),
+CLAUDE_SESSIONS_THRESHOLD (CPU seconds, default 0.15).
+"""
+
+import glob
+import json
+import os
+import platform
+import pwd
+import re
+import socket
+import subprocess
+import sys
+import time
+
+SAMPLE = float(os.environ.get("CLAUDE_SESSIONS_SAMPLE", "3"))
+THRESHOLD = float(os.environ.get("CLAUDE_SESSIONS_THRESHOLD", "0.15"))
+
+# The first argument after the program that marks a helper process, not a session.
+HELPER_ARGS = {
+    "daemon", "bg-pty-host", "agents", "mcp", "mcp-server", "app-server",
+    "--chrome-native-host", "remote-control",
+}
+RUNNING_STATUS = {"busy"}
+SUPERVISOR_CWD = re.compile(r"/(projects/firstmate|fm-homes/[^/]+)/?$")
+LINUX = platform.system() == "Linux"
+
+
+def program_of(args):
+    """Return 'claude', 'claude-bg' (a daemon spare) or 'codex' for an agent, else None."""
+    words = args.split()
+    if not words:
+        return None
+    exe = words[0]
+    base = exe.rsplit("/", 1)[-1]
+    if base == "claude" or "/claude/versions/" in exe:
+        prog = "claude"
+    elif base == "codex":
+        prog = "codex"
+    else:
+        return None
+    if "--chrome-native-host" in words[1:]:
+        return None
+    sub = subcommand(words[1:])
+    if sub in HELPER_ARGS:
+        return None
+    return "claude-bg" if sub == "bg-spare" else prog
+
+
+# Options that take a value, so the word after them is not the subcommand.
+VALUE_OPTIONS = {"-c", "--config", "-m", "--model", "-p", "--profile", "-C", "--cd",
+                 "-s", "--sandbox", "-a", "--ask-for-approval", "-i", "--image"}
+
+
+def subcommand(words):
+    """The first word that is not an option or an option's value."""
+    skip = False
+    for w in words:
+        if skip:
+            skip = False
+        elif w in VALUE_OPTIONS:
+            skip = True
+        elif not w.startswith("-"):
+            return w
+    return None
+
+
+def cpu_seconds(text):
+    """Parse a ps cputime such as `1:02.50`, `01:02:03` or `2-01:02:03`."""
+    days = 0
+    if "-" in text:
+        d, text = text.split("-", 1)
+        days = int(d)
+    secs = 0.0
+    for part in text.split(":"):
+        secs = secs * 60 + float(part)
+    return days * 86400 + secs
+
+
+def list_processes():
+    """Every process as {pid: (ppid, uid, etime, args)}."""
+    out = subprocess.run(
+        ["ps", "-eo", "pid=,ppid=,uid=,etime=,args="],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    procs = {}
+    for line in out.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 5:
+            continue
+        pid, ppid, uid, etime, args = parts
+        procs[int(pid)] = (int(ppid), int(uid), etime, args)
+    return procs
+
+
+def cpu_times():
+    """CPU seconds used so far, per pid. Linux reads /proc for 10 ms precision."""
+    times = {}
+    if LINUX:
+        tick = os.sysconf("SC_CLK_TCK")
+        for path in glob.glob("/proc/[0-9]*/stat"):
+            try:
+                with open(path) as f:
+                    fields = f.read().rsplit(")", 1)[1].split()
+                times[int(path.split("/")[2])] = (int(fields[11]) + int(fields[12])) / tick
+            except (OSError, IndexError, ValueError):
+                pass
+        return times
+    out = subprocess.run(["ps", "-eo", "pid=,time="], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            times[int(parts[0])] = cpu_seconds(parts[1])
+    return times
+
+
+def tree_delta(root, procs, before, after):
+    """CPU seconds the process and all its descendants used between two samples."""
+    total = 0.0
+    for pid in after:
+        q = pid
+        seen = 0
+        while q not in (root, 0, 1) and q in procs and seen < 64:
+            q = procs[q][0]
+            seen += 1
+        if q == root:
+            total += after[pid] - before.get(pid, 0.0)
+    return total
+
+
+def session_records():
+    """The current user's Claude session records, per pid."""
+    records = {}
+    home = os.path.expanduser("~")
+    for path in glob.glob(os.path.join(home, ".claude*", "sessions", "*.json")):
+        try:
+            with open(path) as f:
+                rec = json.load(f)
+            records[int(rec["pid"])] = rec
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    return records
+
+
+def classify_record(rec):
+    """(state, rule) from a session record, or None when the record cannot decide."""
+    if rec.get("spare") is True:
+        return "idle", "status:spare"
+    status = rec.get("status")
+    if not isinstance(status, str):
+        return None
+    return ("running" if status in RUNNING_STATUS else "idle"), "status:" + status
+
+
+def folder_of(pid, uid, rec):
+    if rec and isinstance(rec.get("cwd"), str):
+        return rec["cwd"]
+    if uid != os.getuid():
+        return "?"
+    try:
+        if LINUX:
+            return os.readlink("/proc/%d/cwd" % pid)
+        out = subprocess.run(
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+        for line in out.splitlines():
+            if line.startswith("n"):
+                return line[1:]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "?"
+
+
+def user_name(uid):
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return str(uid)
+
+
+def collect():
+    procs = list_processes()
+    me = os.getuid()
+    records = session_records()
+    rows = []
+    for pid, (ppid, uid, etime, args) in sorted(procs.items()):
+        prog = program_of(args)
+        if prog is None:
+            continue
+        rec = records.get(pid) if uid == me and prog.startswith("claude") else None
+        decided = classify_record(rec) if rec else None
+        folder = folder_of(pid, uid, rec)
+        rows.append({
+            "user": user_name(uid),
+            "pid": pid,
+            "age": etime,
+            "program": prog,
+            "kind": "lead" if SUPERVISOR_CWD.search(folder) else "session",
+            "state": decided[0] if decided else None,
+            "rule": decided[1] if decided else None,
+            "folder": folder,
+        })
+
+    pending = [r for r in rows if r["state"] is None]
+    if pending:
+        before = cpu_times()
+        time.sleep(SAMPLE)
+        after = cpu_times()
+        procs = list_processes()
+        for r in pending:
+            used = tree_delta(r["pid"], procs, before, after)
+            r["state"] = "running" if used >= THRESHOLD else "idle"
+            r["rule"] = "cpu:%.2fs" % used
+
+    users = {user_name(me): {"running": 0, "idle": 0}}
+    leads = []
+    for r in rows:
+        if r["kind"] == "lead":
+            leads.append(r)
+            continue
+        u = users.setdefault(r["user"], {"running": 0, "idle": 0})
+        u[r["state"]] += 1
+    return {
+        "host": socket.gethostname().split(".")[0],
+        "me": user_name(me),
+        "sampleSeconds": SAMPLE if pending else 0,
+        "users": users,
+        "rows": rows,
+    }
+
+
+def print_human(result):
+    users = result["users"]
+    sample = result["sampleSeconds"]
+    print("Running sessions on %s:" % result["host"])
+    width = max(len(u) for u in users)
+    for name in sorted(users, key=lambda u: (u != user_name(os.getuid()), u)):
+        c = users[name]
+        print("  %-*s %3d running  (%d idle)" % (width, name, c["running"], c["idle"]))
+    leads = [r for r in result["rows"] if r["kind"] == "lead"]
+    if leads:
+        print("  Not counted: %d firstmate lead%s." % (len(leads), "" if len(leads) == 1 else "s"))
+    if sample:
+        print("  CPU rule: %g CPU seconds in a %g s sample." % (THRESHOLD, sample))
+    print()
+    head = ("USER", "PID", "AGE", "STATE", "RULE", "KIND", "FOLDER")
+    lines = [head] + [
+        (r["user"], str(r["pid"]), r["age"], r["state"], r["rule"],
+         r["program"] if r["kind"] == "session" else r["program"] + "/lead", r["folder"])
+        for r in sorted(result["rows"], key=lambda r: (r["user"], r["state"] != "running", r["pid"]))
+    ]
+    widths = [max(len(l[i]) for l in lines) for i in range(len(head) - 1)]
+    for l in lines:
+        print("  ".join(c.ljust(w) if i != 1 else c.rjust(w) for i, (c, w) in enumerate(zip(l, widths))) + "  " + l[-1])
+
+
+def self_test():
+    assert program_of("claude --resume abc") == "claude"
+    assert program_of("/Users/x/.local/bin/claude daemon run --json-path x") is None
+    assert program_of("claude bg-pty-host --bg-pty-host /tmp/a.sock 200 50") is None
+    assert program_of("claude bg-spare --bg-spare /tmp/a.claim.sock") == "claude-bg"
+    assert program_of("claude agents --permission-mode bypassPermissions") is None
+    assert program_of("/Users/x/.local/bin/claude --chrome-native-host") is None
+    assert program_of("/x/vendor/bin/codex exec --dangerously-bypass-approvals-and-sandbox") == "codex"
+    assert program_of("codex -c features.x=true app-server --listen unix://") is None
+    assert program_of("node /home/x/.local/bin/codex exec -C .") is None
+    assert program_of("/bin/zsh -c claude") is None
+    assert program_of("/Users/x/.local/share/claude/versions/2.1.318 -p hi") == "claude"
+    assert cpu_seconds("1:02.50") == 62.5
+    assert cpu_seconds("01:02:03") == 3723
+    assert cpu_seconds("2-00:00:01") == 172801
+    assert classify_record({"status": "busy"}) == ("running", "status:busy")
+    assert classify_record({"status": "shell"}) == ("idle", "status:shell")
+    assert classify_record({"status": "waiting"}) == ("idle", "status:waiting")
+    assert classify_record({"status": "busy", "spare": True}) == ("idle", "status:spare")
+    assert classify_record({}) is None
+    assert SUPERVISOR_CWD.search("/Users/j/projects/firstmate")
+    assert SUPERVISOR_CWD.search("/Users/j/fm-homes/ren-product/")
+    assert not SUPERVISOR_CWD.search("/Users/j/fm-homes/ren-product/projects/ren")
+    procs = {10: (1, 0, "", ""), 11: (10, 0, "", ""), 12: (11, 0, "", ""), 20: (1, 0, "", "")}
+    assert abs(tree_delta(10, procs, {10: 1, 11: 1}, {10: 1.1, 11: 1.2, 12: 0.3, 20: 9}) - 0.6) < 1e-9
+    print("self-test passed")
+
+
+def main(argv):
+    if "--self-test" in argv:
+        return self_test()
+    if "-h" in argv or "--help" in argv:
+        print(__doc__)
+        return
+    result = collect()
+    if "--json" in argv:
+        json.dump(result, sys.stdout)
+        print()
+    else:
+        print_human(result)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

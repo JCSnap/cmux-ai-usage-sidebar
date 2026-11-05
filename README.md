@@ -267,6 +267,29 @@ proxy. Set `cliProxyURL` to add one:
 - `claude` and `codex` pools are supported. Discovery proposes one pool for
   each of them when the management key and an auth file of that provider exist.
 
+### Daily pool burn
+
+After each collection the daemon writes `~/.config/ai-usage/pool-day.json`. It
+holds, for each pool, how many accounts of weekly quota the pool spent today.
+A status line can read this file instead of calling a usage endpoint.
+
+- Every machine that uses the pool sends its requests through the same logins.
+  The burn is therefore the total of all machines, not this machine alone.
+- `accountsBurned` is the sum of today's rise in each login's weekly window.
+  One login going from 0% to 100% is one account.
+- `breakEvenAccountsPerDay` is `memberCount / 7`, the rate at which the pool
+  refills. A day above it spends headroom faster than it comes back.
+- The day is the local calendar day. The first reading of the day is each
+  login's baseline.
+- A weekly reset inside the day adds the rise before the reset. The new window
+  then counts from zero.
+- A login without a fresh reading keeps its last value. `partial` is then true
+  and `missing` names the login.
+- `since` is when the first baseline of the day was taken. If the daemon was not
+  running at midnight, the burn before `since` is not counted. `coversDay` is
+  false when `since` is more than 15 minutes after midnight.
+- Usage between the last reading before a reset and the reset is not counted.
+
 ### Steer a pool toward logins that reset soon
 
 CLIProxyAPI does not read reset times. Headroom on a login that resets soon is

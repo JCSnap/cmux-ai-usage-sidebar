@@ -96,7 +96,8 @@ if arguments.contains("--once") {
 // A first install still waits for real readings instead of serving an empty placeholder.
 let cached = SnapshotStore.loadCache()
 let store = SnapshotStore(initial: cached ?? .empty, cachePath: Config.cachePath)
-let coordinator = RefreshCoordinator(store: store, collector: collector, config: config)
+let coordinator = RefreshCoordinator(
+    store: store, collector: collector, config: config, poolDayPath: PoolDayLedger.path)
 await coordinator.refresh(force: true)
 if cached == nil { await coordinator.waitForRefresh() }
 let server = try UsageServer(port: config.port, onRequest: { request in

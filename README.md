@@ -306,6 +306,26 @@ A status line can read this file instead of calling a usage endpoint.
   and the burn before it is not counted.
 - Usage between the last reading before a reset and the reset is not counted.
 
+The same file says how much of the pool to use now. Each login resets on its
+own schedule, so the even `breakEvenAccountsPerDay` can be wrong in both
+directions. All rates are accounts per day.
+
+- `floorAccountsPerDay` is the use-it-or-lose-it rate. For each upcoming reset
+  time T, the daemon adds the quota left on every login that resets by T and
+  divides it by the time to T. The floor is the largest result.
+  `floorAccounts` is that quota and `floorDeadline` is that T. A pace below the
+  floor lets quota reset unused.
+- `ceilingAccountsPerDay` is the fastest rate that does not run the pool dry.
+  For each time T in the next 7 days, the pool can use the quota left now plus
+  one account for each reset before T. The ceiling is the smallest of these
+  amounts per day, and `ceilingDeadline` is that T.
+- `paceAccountsPerDay` is the burn over the last 6 hours. It needs one hour of
+  samples. `burnSamples` holds the running total, at most one sample each 10
+  minutes. The total crosses midnight. The first collection after an upgrade
+  seeds it with today's burn since `since`.
+- A reset time in the past counts as a full account that resets one week later.
+- A ledger without these fields still loads. They are set at the next collection.
+
 ### Steer a pool toward logins that reset soon
 
 CLIProxyAPI does not read reset times. Headroom on a login that resets soon is

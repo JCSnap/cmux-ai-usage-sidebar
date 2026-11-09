@@ -116,6 +116,20 @@ public struct PoolDay: Codable, Sendable, Equatable {
     /// The logins without a fresh reading in the latest collection.
     public var missing: [String]
     public var logins: [String: LoginDay]
+    /// The use-it-or-lose-it rate, in accounts per day. See `PoolBudget`.
+    /// Nil in a ledger written before this field existed, as are the fields below.
+    public var floorAccountsPerDay: Double?
+    /// The quota that resets unused at `floorDeadline` unless it is used first.
+    public var floorAccounts: Double?
+    public var floorDeadline: Date?
+    /// The fastest rate, in accounts per day, that does not run the pool dry.
+    public var ceilingAccountsPerDay: Double?
+    public var ceilingDeadline: Date?
+    /// The burn rate over the last 6 hours, in accounts per day. Nil until the
+    /// samples span one hour.
+    public var paceAccountsPerDay: Double?
+    /// The running total burn, at most one sample per 10 minutes, for the pace.
+    public var burnSamples: [BurnSample]?
 
     static let coverSlack: TimeInterval = 15 * 60
     /// How far before midnight a reading still serves as the day's baseline.
@@ -142,9 +156,19 @@ public struct PoolDay: Codable, Sendable, Equatable {
             let readAt = member.updatedAt ?? now
             logins[member.id] = logins[member.id]?.reading(week, at: readAt) ?? LoginDay(first: week, at: readAt)
         }
-        return summary(
+        let samples = earlier?.burnSamples ?? []
+        var next = summary(
             day: today, logins: logins, memberCount: members.count, missing: missing,
-            at: now, calendar: calendar)
+            samples: samples, at: now, calendar: calendar)
+        // A new day starts its count from zero, so its whole count is new burn.
+        var before = earlier?.day == today ? earlier?.accountsBurned ?? 0 : 0
+        if samples.isEmpty {
+            // The first samples: today's count so far, spread from its start.
+            next.burnSamples = [BurnSample(at: next.since, total: 0)]
+            before = 0
+        }
+        next.record(burn: max(0, next.accountsBurned - before), at: now)
+        return next
     }
 
     /// Today's entry rebuilt from logged readings. Membership and missing logins
@@ -165,7 +189,7 @@ public struct PoolDay: Codable, Sendable, Equatable {
         return summary(
             day: dayKey(now, calendar: calendar), logins: logins,
             memberCount: earlier?.memberCount ?? logins.count, missing: earlier?.missing ?? [],
-            at: now, calendar: calendar)
+            samples: earlier?.burnSamples ?? [], at: now, calendar: calendar)
     }
 
     /// The logins whose last reading of the previous day fell in the half hour
@@ -178,9 +202,11 @@ public struct PoolDay: Codable, Sendable, Equatable {
         }
     }
 
+    /// The day's entry. A rebuilt day keeps `samples` as they are: the burn it
+    /// finds happened over hours, not since the last sample.
     static func summary(
         day: String, logins: [String: LoginDay], memberCount: Int, missing: [String],
-        at now: Date, calendar: Calendar
+        samples: [BurnSample], at now: Date, calendar: Calendar
     ) -> PoolDay {
         let midnight = calendar.startOfDay(for: now)
         let latestStart = logins.values.map { $0.baselineAt ?? now }.max() ?? now
@@ -197,7 +223,46 @@ public struct PoolDay: Codable, Sendable, Equatable {
             accountsBurned: logins.values.reduce(0) { $0 + $1.burned },
             partial: !missing.isEmpty,
             missing: missing,
-            logins: logins)
+            logins: logins,
+            burnSamples: samples
+        ).budgeted(at: now)
+    }
+
+    /// The entry with floor, ceiling and pace set for `now`.
+    func budgeted(at now: Date) -> PoolDay {
+        var next = self
+        let budget = PoolBudget.compute(
+            logins.values.map { PoolBudget.Login(remaining: 1 - $0.last, resetsAt: $0.resetsAt) }, at: now)
+        next.floorAccountsPerDay = budget?.floorAccountsPerDay
+        next.floorAccounts = budget?.floorAccounts
+        next.floorDeadline = budget?.floorDeadline
+        next.ceilingAccountsPerDay = budget?.ceilingAccountsPerDay
+        next.ceilingDeadline = budget?.ceilingDeadline
+        next.paceAccountsPerDay = PoolBudget.pace(burnSamples ?? [], at: now)
+        return next
+    }
+
+    /// The minimum gap between two kept samples.
+    static let sampleSpacing: TimeInterval = 10 * 60
+
+    /// Adds `burn` accounts to the running total at `now` and sets the pace.
+    ///
+    /// The newest sample moves forward until it is `sampleSpacing` past the one
+    /// before it, so the list stays short. Samples older than the pace window
+    /// go, except the one that starts it.
+    mutating func record(burn: Double, at now: Date) {
+        var samples = burnSamples ?? []
+        let total = (samples.last?.total ?? 0) + burn
+        if samples.count >= 2, samples[samples.count - 2].at > now - Self.sampleSpacing {
+            samples[samples.count - 1] = BurnSample(at: now, total: total)
+        } else {
+            samples.append(BurnSample(at: now, total: total))
+        }
+        if let start = samples.lastIndex(where: { $0.at <= now - PoolBudget.paceWindow }) {
+            samples.removeFirst(start)
+        }
+        burnSamples = samples
+        paceAccountsPerDay = PoolBudget.pace(samples, at: now)
     }
 
     static func dayKey(_ date: Date, calendar: Calendar) -> String {

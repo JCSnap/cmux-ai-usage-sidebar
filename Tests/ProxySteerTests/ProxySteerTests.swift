@@ -19,6 +19,107 @@ private func member(
         state: state, windows: windows, detail: detail)
 }
 
+// MARK: - Earliest-deadline-first rule
+
+private func weights(_ decisions: [SteerWeight.Decision]) -> [Int?] {
+    decisions.map { decision in
+        if case .weight(let weight, _) = decision { return weight }
+        return nil
+    }
+}
+
+/// The pool on 2026-11-09, labelled generically. Two logins reset on Tuesday
+/// with 19% left. Six reset on Saturday or Sunday, mostly unused. The weekly
+/// rule gave all eight 20 to 36, so traffic was near even. Under EDF the two
+/// Tuesday logins take 339 of 402, or 84% of new sessions.
+@Test func edfSpendsTheTuesdayLoginsFirst() {
+    let pool = [
+        member("tue1@x", used: [0.00, 0.81], resetsIn: [5, 30]),
+        member("tue2@x", used: [0.10, 0.81], resetsIn: [3, 31]),
+        member("sat1@x", used: [0.05, 0.08], resetsIn: [2, 120]),
+        member("sat2@x", used: [0.00, 0.08], resetsIn: [5, 123]),
+        member("sat3@x", used: [0.06, 0.19], resetsIn: [4, 120]),
+        member("sun1@x", used: [0.07, 0.08], resetsIn: [1, 135]),
+        member("sun2@x", used: [0.08, 0.20], resetsIn: [2, 141]),
+        member("sun3@x", used: [0.00, 0.08], resetsIn: [5, 142]),
+    ]
+    let decisions = SteerWeight.decide(pool, now: now)
+    #expect(weights(decisions) == [190, 149, 13, 13, 12, 9, 7, 9])
+    #expect(decisions[1] == .weight(149, reason: "weekly 19% free, reset in 31.0h (earliest 30.0h), 5h 10% used"))
+    // The weekly rule on the same pool: near even.
+    #expect(weights(pool.map { SteerWeight.decide($0, now: now, basis: .weekly) }) == [32, 27, 36, 37, 32, 31, 20, 32])
+}
+
+/// A login that resets in 12 hours with 90% left takes nearly all new sessions.
+@Test func edfLoginAboutToResetWithHeadroomTakesTheTop() {
+    let pool = [
+        member("soon@x", used: [0.0, 0.10], resetsIn: [5, 12]),
+        member("sat@x", used: [0.0, 0.08], resetsIn: [5, 120]),
+    ]
+    #expect(SteerWeight.decide(pool, now: now) == [
+        .weight(900, reason: "weekly 90% free, reset in 12.0h (earliest 12.0h), 5h 0% used"),
+        .weight(1, reason: "weekly 92% free, reset in 120.0h (earliest 12.0h), 5h 0% used"),
+    ])
+}
+
+/// A login at its 5-hour limit leaves the top tier, and the next deadline leads.
+@Test(arguments: [0.75, 0.90, 1.0])
+func edfLoginAtFiveHourLimitLeavesTheTop(fiveUsed: Double) {
+    let pool = [
+        member("tue@x", used: [fiveUsed, 0.81], resetsIn: [1, 30]),
+        member("sat@x", used: [0.0, 0.08], resetsIn: [5, 120]),
+    ]
+    #expect(SteerWeight.decide(pool, now: now) == [
+        .weight(1, reason: "5h \(Int((fiveUsed * 100).rounded()))% used"),
+        .weight(920, reason: "weekly 92% free, reset in 120.0h (earliest 120.0h), 5h 0% used"),
+    ])
+}
+
+@Test(arguments: [
+    // The 5-hour factor (0.75 - used) / 0.75 spills new sessions to the next login.
+    (0.50, [Int?.some(63), .some(14)]),
+    (0.74, [.some(3), .some(14)]),
+])
+func edfFiveHourFactorSpillsToTheNextDeadline(fiveUsed: Double, expected: [Int?]) {
+    let pool = [
+        member("tue@x", used: [fiveUsed, 0.81], resetsIn: [1, 30]),
+        member("sat@x", used: [0.0, 0.08], resetsIn: [5, 120]),
+    ]
+    #expect(weights(SteerWeight.decide(pool, now: now)) == expected)
+}
+
+@Test func edfGatesAndUnreadableMembersDoNotSetTheEarliestDeadline() {
+    let pool = [
+        member("full@x", used: [0.0, 0.96], resetsIn: [5, 10]),
+        member("cool@x", state: .error, detail: "HTTP 429: rate limited"),
+        member("stale@x", state: .stale, detail: "timed out"),
+        member("seat@x", used: [0.5], resetsIn: [1]),
+        member("sat@x", used: [0.0, 0.08], resetsIn: [5, 120]),
+        member("none@x", used: [0.0, 0.0], resetsIn: [5, nil]),
+    ]
+    #expect(SteerWeight.decide(pool, now: now) == [
+        .weight(1, reason: "weekly 96% used"),
+        .weight(1, reason: "cooling down"),
+        .keep(reason: "no fresh reading (stale)"),
+        // A team seat with no weekly window falls back to the tightest rule.
+        .weight(125, reason: "50% free, reset in 1.0h"),
+        .weight(920, reason: "weekly 92% free, reset in 120.0h (earliest 120.0h), 5h 0% used"),
+        // No weekly reset time: a full week away.
+        .weight(364, reason: "weekly 100% free, reset in 168.0h (earliest 120.0h), 5h 0% used"),
+    ])
+}
+
+@Test func edfPlanComparesOnlyLoginsTheProxyHolds() throws {
+    let snap = snapshot(age: 60, members: [
+        member("a@x", used: [0.0, 0.10], resetsIn: [5, 120]),
+        // c@x has no claude login, so its early reset does not count.
+        member("c@x", used: [0.0, 0.10], resetsIn: [5, 12]),
+    ])
+    let rows = try ProxySteer.plan(snapshot: snap, poolID: "cc3", entries: entries, now: now)
+    #expect(rows.map(\.newWeight) == [900, nil])
+    #expect(rows.map(\.reason) == ["weekly 90% free, reset in 120.0h (earliest 120.0h), 5h 0% used", "no proxy login"])
+}
+
 // MARK: - Weekly weight rule
 
 /// `used` and `hours` list the 5-hour window first, then the weekly window.
@@ -55,17 +156,19 @@ func weeklyRule(used: [Double], hours: [Double?], expected: SteerWeight.Decision
 @Test func weeklyHeadroomResettingSoonOutweighsBusyFiveHourWindow() {
     let alice = member("alice@x", used: [0.0, 0.53], resetsIn: [5, 48])
     let bob = member("bob@x", used: [0.75, 0.09], resetsIn: [1.2, 163])
-    guard case .weight(let aliceWeight, _) = SteerWeight.decide(alice, now: now),
-          case .weight(let bobWeight, _) = SteerWeight.decide(bob, now: now)
+    guard case .weight(let aliceWeight, _) = SteerWeight.decide(alice, now: now, basis: .weekly),
+          case .weight(let bobWeight, _) = SteerWeight.decide(bob, now: now, basis: .weekly)
     else { Issue.record("expected weights"); return }
     #expect(aliceWeight > bobWeight)
     #expect(aliceWeight == 49)
     #expect(bobWeight == 5)
 }
 
-@Test func basisDefaultsToWeekly() {
+@Test func basisDefaultsToEDF() {
     let alice = member("alice@x", used: [0.0, 0.53], resetsIn: [5, 48])
-    #expect(SteerWeight.decide(alice, now: now) == SteerWeight.decide(alice, now: now, basis: .weekly))
+    #expect(SteerWeight.decide(alice, now: now) == SteerWeight.decide(alice, now: now, basis: .edf))
+    #expect(SteerWeight.decide([alice], now: now) == [SteerWeight.decide(alice, now: now, basis: .edf)])
+    #expect(SteerWeight.Basis(rawValue: "edf") == .edf)
     #expect(SteerWeight.Basis(rawValue: "tightest") == .tightest)
     #expect(SteerWeight.Basis(rawValue: "soonest") == nil)
 }
@@ -150,8 +253,10 @@ private let entries = [
 
 @Test func planPassesTheBasisThrough() throws {
     let snap = snapshot(age: 60, members: [member("a@x", used: [0.0, 0.53], resetsIn: [5, 48])])
-    let weekly = try ProxySteer.plan(snapshot: snap, poolID: "cc3", entries: entries, now: now)
     let tightest = try ProxySteer.plan(snapshot: snap, poolID: "cc3", entries: entries, now: now, basis: .tightest)
+    let edf = try ProxySteer.plan(snapshot: snap, poolID: "cc3", entries: entries, now: now)
+    let weekly = try ProxySteer.plan(snapshot: snap, poolID: "cc3", entries: entries, now: now, basis: .weekly)
+    #expect(edf.map(\.newWeight) == [470])
     #expect(weekly.map(\.newWeight) == [49])
     #expect(tightest.map(\.newWeight) == [24])
 }

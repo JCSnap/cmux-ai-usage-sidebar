@@ -3,15 +3,17 @@ import ProxySteer
 import UsageModels
 
 let usage = """
-usage: aiusage proxy-steer [--dry-run] [--pool ID] [--basis weekly|tightest]
+usage: aiusage proxy-steer [--dry-run] [--pool ID] [--basis edf|weekly|tightest]
 
 Sets each CLIProxyAPI pool login's routing weight from the aiusaged snapshot.
 Logins that reset soon with headroom left get more new sessions. The proxy
 must use `strategy: weighted-round-robin` for weights to matter.
   --dry-run   print the planned weights and change nothing
   --pool ID   pool account id in ~/.config/ai-usage/config.json (default cc3)
-  --basis B   weekly: weekly headroom per hour to the weekly reset drives the
-              weight; the 5-hour window only gates it (default)
+  --basis B   edf: earliest deadline first; the login whose weekly window
+              resets soonest gets most new sessions (default)
+              weekly: weekly headroom per hour to the weekly reset drives the
+              weight; the 5-hour window only gates it
               tightest: the fullest window and the soonest reset drive it
 
 The daemon port, proxy URL and management key file come from that config.
@@ -52,7 +54,7 @@ arguments.removeFirst()
 
 var dryRun = false
 var poolID = "cc3"
-var basis = SteerWeight.Basis.weekly
+var basis = SteerWeight.Basis.edf
 while let argument = arguments.first {
     arguments.removeFirst()
     switch argument {
@@ -63,7 +65,7 @@ while let argument = arguments.first {
         poolID = next
     case "--basis":
         guard let next = arguments.first, let value = SteerWeight.Basis(rawValue: next) else {
-            fail("--basis needs weekly or tightest")
+            fail("--basis needs edf, weekly or tightest")
         }
         arguments.removeFirst()
         basis = value

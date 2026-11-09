@@ -5,9 +5,9 @@
 # of each pool login. The proxy must use `strategy: "weighted-round-robin"`.
 # Install the daemon first with ./scripts/install-daemon.sh.
 #
-# Usage: ./scripts/install-proxy-steer.sh [POOL] [--basis weekly|tightest]
+# Usage: ./scripts/install-proxy-steer.sh [POOL] [--basis edf|weekly|tightest]
 #   POOL     pool account id (default cc3)
-#   --basis  which window drives the weight (default weekly)
+#   --basis  which window drives the weight (default edf)
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,11 +16,11 @@ label="dev.jcsnap.aiusage-proxy-steer"
 plist="$HOME/Library/LaunchAgents/$label.plist"
 log_dir="$HOME/Library/Logs/ai-usage"
 pool="cc3"
-basis="weekly"
+basis="edf"
 while [ $# -gt 0 ]; do
     case "$1" in
         --basis)
-            [ $# -ge 2 ] || { echo "--basis needs weekly or tightest" >&2; exit 2; }
+            [ $# -ge 2 ] || { echo "--basis needs edf, weekly or tightest" >&2; exit 2; }
             basis="$2"
             shift 2
             ;;
@@ -30,8 +30,8 @@ while [ $# -gt 0 ]; do
     esac
 done
 case "$basis" in
-    weekly|tightest) ;;
-    *) echo "--basis must be weekly or tightest, not $basis" >&2; exit 2 ;;
+    edf|weekly|tightest) ;;
+    *) echo "--basis must be edf, weekly or tightest, not $basis" >&2; exit 2 ;;
 esac
 
 echo "==> Building release binary"

@@ -287,3 +287,55 @@ private final class Clock: @unchecked Sendable {
     }
     #expect(await calls.pools == ["cc3", "cc3"])
 }
+
+@Test func eachCollectionSetsFloorCeilingAndAPaceThatCrossesMidnight() throws {
+    let ledger = run([
+        (local(18, 0, day: 4), snapshot(member("a", 0.20), member("b", 0.50))),
+        (local(21, 0, day: 4), snapshot(member("a", 0.30), member("b", 0.50))),
+        (local(23, 45, day: 4), snapshot(member("a", 0.35), member("b", 0.50))),
+        (local(3, 0), snapshot(member("a", 0.50), member("b", 0.50))),
+    ])
+    let day = try #require(ledger.pools["cc3"])
+    #expect(day.day == "2026-11-05")
+    #expect(near(day.accountsBurned, 0.15))
+    // The running total is 0.10 at 21:00 and 0.30 at 03:00: 0.20 in 6 hours.
+    #expect(near(day.burnSamples?.last?.total, 0.30))
+    #expect(near(day.paceAccountsPerDay, 0.8))
+    // Both logins reset at weekEnd, 81 hours on, with 1.0 account left between them.
+    #expect(near(day.floorAccounts, 1.0))
+    #expect(day.floorDeadline == weekEnd)
+    #expect(near(day.floorAccountsPerDay, 24.0 / 81))
+    #expect(near(day.ceilingAccountsPerDay, 24.0 / 81))
+    #expect(day.ceilingDeadline == weekEnd)
+}
+
+@Test func collectionsCloserThanTenMinutesMoveTheNewestSample() throws {
+    let ledger = run([
+        (local(9, 0), snapshot(member("a", 0.20))),
+        (local(9, 1), snapshot(member("a", 0.21))),
+        (local(9, 5), snapshot(member("a", 0.22))),
+        (local(9, 12), snapshot(member("a", 0.25))),
+    ])
+    let samples = try #require(ledger.pools["cc3"]?.burnSamples)
+    // The first collection seeds a sample at the start of the count, here 09:00.
+    #expect(samples.map(\.at) == [local(9, 0), local(9, 5), local(9, 12)])
+    #expect(near(samples.last?.total, 0.05))
+}
+
+@Test func aLedgerWrittenBeforeTheBudgetFieldsStillLoads() throws {
+    let old = #"{"version":1,"pools":{"cc3":{"day":"2026-11-05","since":"2026-11-04T16:00:00Z","sinceLocal":"00:00","coversDay":true,"updatedAt":"2026-11-05T06:00:00Z","memberCount":1,"breakEvenAccountsPerDay":0.14,"accountsBurned":0.1,"partial":false,"missing":[],"logins":{}}}}"#
+    let path = NSTemporaryDirectory() + "pool-day-old-\(UUID().uuidString).json"
+    try Data(old.utf8).write(to: URL(fileURLWithPath: path))
+    let day = try #require(PoolDayLedger.load(from: path)?.pools["cc3"])
+    #expect(near(day.accountsBurned, 0.1))
+    #expect(day.burnSamples == nil)
+}
+
+@Test func aLedgerWithoutSamplesTakesItsFirstPaceFromTheDaySoFar() throws {
+    let seeded = run([(local(0, 5), snapshot(member("a", 0.20)))])
+    var day = try #require(seeded.pools["cc3"])
+    day.burnSamples = nil
+    let ledger = run([(local(12, 0), snapshot(member("a", 0.50)))], from: PoolDayLedger(pools: ["cc3": day]))
+    // 0.30 accounts from midnight to noon is 0.6 a day.
+    #expect(near(ledger.pools["cc3"]?.paceAccountsPerDay, 0.6))
+}

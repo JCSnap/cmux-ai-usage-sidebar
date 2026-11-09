@@ -333,16 +333,31 @@ lost if the proxy does not spend it first. `aiusage proxy-steer` sets each
 login's routing weight from the daemon snapshot:
 
 ```bash
-./scripts/install-proxy-steer.sh                 # pool cc3, every 5 minutes, basis weekly
-./scripts/install-proxy-steer.sh --basis tightest
+./scripts/install-proxy-steer.sh                 # pool cc3, every 5 minutes, basis edf
+./scripts/install-proxy-steer.sh --basis weekly
 aiusage proxy-steer --dry-run                    # print the planned weights
 ```
 
 - Set `routing.strategy: "weighted-round-robin"` in the proxy config. Other
   strategies ignore weights. Credential `priority` still wins: only the highest
   priority tier gets traffic, so leave priorities equal.
-- `--basis weekly` is the default. Weekly headroom is the scarce resource, so
-  the weekly window drives the weight:
+- `--basis edf` is the default: earliest deadline first. Weekly headroom that
+  is not spent before its reset is lost, so the login that resets first is
+  spent first:
+  - `weight = 1000 × weekly free share × (earliest / hours) ^ 3 × fiveFactor`.
+    `hours` is the time to the login's weekly reset, at least 5 hours.
+    `earliest` is the smallest `hours` of the logins that pass the gates.
+  - Two logins that reset an hour apart get almost the same weight. A login
+    that resets a day after the earliest one, at 30 hours, gets about 1/6.
+  - The 5-hour gate is 75%. At 75% or more used the login gets 1. Below that
+    the weight is multiplied by `fiveFactor = (0.75 − used) / 0.75`, so new
+    sessions spill to the next deadline as the top login fills its window.
+    The gate is lower than the weekly basis's 90%: the top login takes most new
+    sessions, and the sessions bound to it need room to finish without a 429.
+  - A login at 95% or more of its weekly window gets 1. A login with no weekly
+    window, such as a team seat, uses the tightest rule.
+- `--basis weekly` is the previous default. The weekly window drives the
+  weight in proportion to headroom per hour:
   - `weight = 5000 × weekly free share / hours to weekly reset`, at least 5 hours.
   - The 5-hour window is a gate. At 90% or more used the login gets 1.
     Below that the weight is multiplied by `(0.90 − used) / 0.90`.
@@ -360,7 +375,9 @@ aiusage proxy-steer --dry-run                    # print the planned weights
 - Weights are set with `PATCH /v0/management/auth-files/fields`. The proxy saves
   the auth file itself, so the job never reads a token.
 - Session affinity keeps a bound session on its login. Only new sessions follow
-  the weights.
+  the weights. The affinity TTL is an idle timeout: each request refreshes it.
+  A session that stays busy keeps its login whatever the TTL, until that login
+  is unavailable. A weight of 0 would exclude the login, so the job never sets 0.
 - The log at `~/Library/Logs/ai-usage/proxy-steer.log` shows emails and weights only.
 
 ### Count running agent sessions

@@ -60,7 +60,7 @@ public enum ProxySteer {
     /// email. A member with no login, or no fresh reading, gets no new weight.
     public static func plan(
         snapshot: UsageSnapshot, poolID: String, entries: [AuthEntry], now: Date,
-        basis: SteerWeight.Basis = .weekly
+        basis: SteerWeight.Basis = .edf
     ) throws -> [Row] {
         let age = now.timeIntervalSince(snapshot.generatedAt)
         guard age <= maxSnapshotAge else { throw PlanError.staleSnapshot(ageSeconds: Int(age)) }
@@ -73,12 +73,17 @@ public enum ProxySteer {
                 .filter { $0.provider == pool.provider.rawValue && !$0.disabled }
                 .compactMap { entry in entry.email.map { ($0.lowercased(), entry) } },
             uniquingKeysWith: { first, _ in first })
-        return members.map { member in
-            let email = member.email ?? member.displayName
-            guard let entry = byEmail[email.lowercased()] else {
+        // Only members with a proxy login compete for the earliest deadline.
+        let emails = members.map { $0.email ?? $0.displayName }
+        let matched = members.indices.filter { byEmail[emails[$0].lowercased()] != nil }
+        let decisions = Dictionary(
+            uniqueKeysWithValues: zip(matched, SteerWeight.decide(matched.map { members[$0] }, now: now, basis: basis)))
+        return members.indices.map { index in
+            let email = emails[index]
+            guard let entry = byEmail[email.lowercased()], let decision = decisions[index] else {
                 return Row(email: email, name: nil, currentWeight: nil, newWeight: nil, reason: "no proxy login")
             }
-            switch SteerWeight.decide(member, now: now, basis: basis) {
+            switch decision {
             case .weight(let weight, let reason):
                 return Row(email: email, name: entry.name, currentWeight: entry.weight, newWeight: weight, reason: reason)
             case .keep(let reason):

@@ -15,6 +15,9 @@ import UsageModels
 public enum SteerWeight {
     /// Which window drives the weight.
     public enum Basis: String, CaseIterable, Sendable {
+        /// Earliest deadline first. The login whose weekly window resets
+        /// soonest gets most new sessions. See `decideEDF`.
+        case edf
         /// The weekly window drives the weight. The 5-hour window only gates it.
         /// See `decideWeekly`.
         case weekly
@@ -34,18 +37,31 @@ public enum SteerWeight {
         case keep(reason: String)
     }
 
-    public static func decide(_ member: UsageAccount, now: Date, basis: Basis = .weekly) -> Decision {
-        switch member.state {
-        case .ok:
-            break
-        case .error where isCoolingDown(member):
-            return .weight(minWeight, reason: "cooling down")
-        default:
-            return .keep(reason: "no fresh reading (\(member.state.rawValue))")
+    /// One decision per member, in order. The `edf` basis compares members,
+    /// so it needs the whole pool. The other bases decide each member alone.
+    public static func decide(_ members: [UsageAccount], now: Date, basis: Basis = .edf) -> [Decision] {
+        guard basis == .edf else { return members.map { decide($0, now: now, basis: basis) } }
+        let readings = members.map { edfReading($0, now: now) }
+        let earliest = readings.compactMap { reading -> Double? in
+            if case .candidate(let candidate) = reading { return candidate.hours }
+            return nil
+        }.min()
+        return readings.map { reading in
+            switch reading {
+            case .decided(let decision): decision
+            case .candidate(let candidate): decideEDF(candidate, earliestHours: earliest ?? candidate.hours)
+            }
         }
+    }
+
+    /// The decision for one member. The `edf` basis sees a pool of one, so the
+    /// member is its own earliest deadline.
+    public static func decide(_ member: UsageAccount, now: Date, basis: Basis = .edf) -> Decision {
+        if basis == .edf { return decide([member], now: now, basis: .edf)[0] }
+        if let early = unreadable(member) { return early }
         guard !member.windows.isEmpty else { return .keep(reason: "no windows") }
         switch basis {
-        case .tightest:
+        case .tightest, .edf:
             return decideTightest(member.windows, now: now)
         case .weekly:
             // A team seat reports no weekly window. Its 5-hour window is all it has.
@@ -55,6 +71,83 @@ public enum SteerWeight {
             return decideWeekly(
                 weekly: weekly, fiveHour: member.windows.first(where: { $0.label == fiveHourLabel }), now: now)
         }
+    }
+
+    /// The decision for a member without a fresh reading, or nil when it has one.
+    static func unreadable(_ member: UsageAccount) -> Decision? {
+        switch member.state {
+        case .ok:
+            return nil
+        case .error where isCoolingDown(member):
+            return .weight(minWeight, reason: "cooling down")
+        default:
+            return .keep(reason: "no fresh reading (\(member.state.rawValue))")
+        }
+    }
+
+    // MARK: - Earliest deadline first
+
+    /// Under `edf` a 5-hour window this full gets `minWeight`. It is lower than
+    /// `fiveHourGate`: the top login takes most new sessions, and the sessions
+    /// already bound to it need room to finish without a 429.
+    public static let edfFiveHourGate = 0.75
+    /// The weight falls with `(earliest hours / hours) ^ edfExponent`. With 3, a
+    /// login that resets a day after the earliest one at 30h gets 1/6 of its
+    /// weight. Two logins that reset an hour apart get almost the same weight.
+    public static let edfExponent = 3.0
+
+    /// A member that passed the gates, waiting for the pool's earliest deadline.
+    struct EDFCandidate {
+        let free: Double
+        let fiveUsed: Double
+        let hours: Double
+    }
+
+    enum EDFReading {
+        case decided(Decision)
+        case candidate(EDFCandidate)
+    }
+
+    static func edfReading(_ member: UsageAccount, now: Date) -> EDFReading {
+        if let early = unreadable(member) { return .decided(early) }
+        guard !member.windows.isEmpty else { return .decided(.keep(reason: "no windows")) }
+        // A team seat reports no weekly window. Its 5-hour window is all it has.
+        guard let weekly = member.windows.first(where: { $0.label == weeklyLabel }) else {
+            return .decided(decideTightest(member.windows, now: now))
+        }
+        let used = clamp01(weekly.usedFraction)
+        if used >= weeklyFullFraction {
+            return .decided(.weight(minWeight, reason: "weekly \(percent(used)) used"))
+        }
+        let fiveUsed = member.windows.first(where: { $0.label == fiveHourLabel }).map { clamp01($0.usedFraction) } ?? 0
+        if fiveUsed >= edfFiveHourGate {
+            return .decided(.weight(minWeight, reason: "5h \(percent(fiveUsed)) used"))
+        }
+        // No reset time means no deadline. Treat it as a full week away.
+        let toReset = weekly.resetsAt.map { $0.timeIntervalSince(now) / 3600 } ?? weekHours
+        return .candidate(EDFCandidate(free: 1 - used, fiveUsed: fiveUsed, hours: max(weeklyMinHours, toReset)))
+    }
+
+    /// Earliest-deadline-first rule. Weekly headroom resets unused unless it is
+    /// spent before its reset, so the login that resets first is spent first.
+    /// 1. Gates: weekly `weeklyFullFraction` or more used, or 5-hour
+    ///    `edfFiveHourGate` or more used, gets `minWeight`.
+    /// 2. `hours` is the time to the weekly reset, at least `weeklyMinHours`.
+    ///    `earliest` is the smallest `hours` of the members that passed the gates.
+    /// 3. `weight = maxWeight * free * (earliest / hours) ^ edfExponent * fiveFactor`,
+    ///    with `fiveFactor = (edfFiveHourGate - used) / edfFiveHourGate`, clamped.
+    ///    The weekly free share scales the weight down near the weekly limit.
+    ///    The 5-hour factor moves new sessions to the next login as the top
+    ///    login fills its 5-hour window.
+    static func decideEDF(_ candidate: EDFCandidate, earliestHours: Double) -> Decision {
+        let deadline = pow(earliestHours / candidate.hours, edfExponent)
+        let fiveFactor = (edfFiveHourGate - candidate.fiveUsed) / edfFiveHourGate
+        let raw = Int((Double(maxWeight) * candidate.free * deadline * fiveFactor).rounded())
+        let weight = min(maxWeight, max(minWeight, raw))
+        let reason = String(
+            format: "weekly %.0f%% free, reset in %.1fh (earliest %.1fh), 5h %@ used",
+            candidate.free * 100, candidate.hours, earliestHours, percent(candidate.fiveUsed))
+        return .weight(weight, reason: reason)
     }
 
     // MARK: - Weekly basis

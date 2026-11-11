@@ -25,6 +25,11 @@ public actor RefreshCoordinator {
     /// Reads the seed log for one pool id, or nil when none is set or it failed.
     private let poolDaySeed: (@Sendable (String) async -> String?)?
     private var lastSeedAttempt: [String: Date] = [:]
+    /// Writes one line to the daemon log.
+    private let log: @Sendable (String) -> Void
+    /// Whether the last ledger write failed. A failure is logged once, and so
+    /// is the next write that works, so a stale ledger shows in the log.
+    private var poolDayWriteFailing = false
     /// A failed or partial seed is tried again after this long.
     static let seedRetry: TimeInterval = 30 * 60
 
@@ -33,7 +38,8 @@ public actor RefreshCoordinator {
         now: @escaping @Sendable () -> Date = { Date() },
         saveConfig: @escaping @Sendable (Config) throws -> Void = { try $0.save() },
         poolDayPath: String? = nil,
-        poolDaySeed: (@Sendable (String) async -> String?)? = nil
+        poolDaySeed: (@Sendable (String) async -> String?)? = nil,
+        log: @escaping @Sendable (String) -> Void = { FileHandle.standardError.write(Data("aiusaged: \($0)\n".utf8)) }
     ) {
         self.store = store
         self.collector = collector
@@ -43,6 +49,7 @@ public actor RefreshCoordinator {
         self.poolDayPath = poolDayPath
         self.poolDay = poolDayPath.flatMap { PoolDayLedger.load(from: $0) } ?? PoolDayLedger()
         self.poolDaySeed = poolDaySeed
+        self.log = log
     }
 
     /// Adds one collection to the daily pool ledger. It reads no vendor API.
@@ -64,7 +71,14 @@ public actor RefreshCoordinator {
             }
         }
         poolDay = poolDay.updated(with: snapshot, at: now())
-        poolDay.save(to: poolDayPath)
+        do {
+            try poolDay.save(to: poolDayPath)
+            if poolDayWriteFailing { log("wrote \(poolDayPath) again") }
+            poolDayWriteFailing = false
+        } catch {
+            if !poolDayWriteFailing { log("could not write \(poolDayPath): \(error)") }
+            poolDayWriteFailing = true
+        }
     }
 
     /// Start one collection. HTTP callers receive the current snapshot immediately.
@@ -103,7 +117,7 @@ public actor RefreshCoordinator {
         do {
             try saveConfig(changed)
         } catch {
-            FileHandle.standardError.write(Data("aiusaged: could not save \(Config.path): \(error)\n".utf8))
+            log("could not save \(Config.path): \(error)")
             return
         }
         config = changed

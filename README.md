@@ -124,6 +124,12 @@ The script builds `aiusaged` and installs the binary in `~/.local/bin`. It then
 starts a LaunchAgent and waits for the first snapshot. The daemon writes a
 default config file at the first start. Step 6 shows how to change that file.
 
+The script refuses a checkout that is behind origin's default branch, because an
+older build silently drops newer features. Update the checkout, or pass
+`--allow-stale` to install the older build anyway. The daemon log
+`~/Library/Logs/ai-usage/aiusaged.log` starts each run with the commit it was
+built from, for example `aiusaged: build 0ce345c serving 4 accounts`.
+
 ### 4. Install the extension
 
 ```bash
@@ -272,6 +278,8 @@ proxy. Set `cliProxyURL` to add one:
 After each collection the daemon writes `~/.config/ai-usage/pool-day.json`. It
 holds, for each pool, how many accounts of weekly quota the pool spent today.
 A status line can read this file instead of calling a usage endpoint.
+If a write fails, the daemon log records the error once, and records the next
+write that works.
 
 - Every machine that uses the pool sends its requests through the same logins.
   The burn is therefore the total of all machines, not this machine alone.

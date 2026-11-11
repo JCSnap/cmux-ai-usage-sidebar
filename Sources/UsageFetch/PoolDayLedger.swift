@@ -83,12 +83,12 @@ public struct PoolDayLedger: Codable, Sendable, Equatable {
     }
 
     /// Writes the ledger atomically, so a reader never sees half a file.
-    public func save(to path: String = PoolDayLedger.path) {
-        guard let data = try? UsageSnapshot.encoder().encode(self) else { return }
+    public func save(to path: String = PoolDayLedger.path) throws {
+        let data = try UsageSnapshot.encoder().encode(self)
         let url = URL(fileURLWithPath: path)
-        try? FileManager.default.createDirectory(
+        try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: url, options: .atomic)
+        try data.write(to: url, options: .atomic)
     }
 }
 

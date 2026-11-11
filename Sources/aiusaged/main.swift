@@ -111,8 +111,10 @@ let server = try UsageServer(port: config.port, onRequest: { request in
     await coordinator.handle(request)
 })
 server.start()
+// The install script sets the commit, so the log shows which build is running.
+let commit = ProcessInfo.processInfo.environment["AIUSAGED_COMMIT"] ?? "unknown"
 FileHandle.standardError.write(Data(
-    "aiusaged: serving \(config.visibleAccounts.count) accounts on 127.0.0.1:\(config.port)\n".utf8))
+    "aiusaged: build \(commit) serving \(config.visibleAccounts.count) accounts on 127.0.0.1:\(config.port)\n".utf8))
 
 await coordinator.waitForRefresh()
 while true {

@@ -3,7 +3,19 @@
 #
 # The daemon must stay unsandboxed. It reads the login keychain and the CLI
 # credential files, which a sandboxed process cannot do.
+#
+# The script refuses a checkout that is behind origin's default branch, because
+# a stale build silently drops features such as the pool-day ledger. Pass
+# --allow-stale to install it anyway.
 set -euo pipefail
+
+allow_stale=0
+for arg in "$@"; do
+    case "$arg" in
+        --allow-stale) allow_stale=1 ;;
+        *) echo "usage: $0 [--allow-stale]" >&2; exit 2 ;;
+    esac
+done
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 bin_dir="$HOME/.local/bin"
@@ -11,8 +23,30 @@ label="dev.jcsnap.aiusaged"
 plist="$HOME/Library/LaunchAgents/$label.plist"
 log_dir="$HOME/Library/Logs/ai-usage"
 
-echo "==> Building release binary"
 cd "$root"
+
+echo "==> Checking that the checkout is current"
+if git fetch --quiet origin 2>/dev/null; then
+    default="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)"
+    behind="$(git rev-list --count "HEAD..$default" 2>/dev/null || echo 0)"
+    if [ "$behind" -gt 0 ]; then
+        echo "This checkout is $behind commits behind $default." >&2
+        git log --oneline "HEAD..$default" | head -5 >&2
+        if [ "$allow_stale" -eq 0 ]; then
+            echo "Update it first, or pass --allow-stale to install the older build." >&2
+            exit 1
+        fi
+        echo "Installing the older build because of --allow-stale." >&2
+    fi
+else
+    echo "Could not fetch origin. Installing without the freshness check." >&2
+fi
+commit="$(git rev-parse --short HEAD)"
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    commit="$commit-dirty"
+fi
+
+echo "==> Building release binary"
 swift build -c release --product aiusaged
 
 echo "==> Installing to $bin_dir"
@@ -32,6 +66,11 @@ cat > "$plist" <<PLIST
     <array>
         <string>$bin_dir/aiusaged</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>AIUSAGED_COMMIT</key>
+        <string>$commit</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

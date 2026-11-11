@@ -168,7 +168,7 @@ private func near(_ value: Double?, _ expected: Double) -> Bool {
         (local(0, 5), snapshot(member("a", 0.20))),
         (local(9, 0), snapshot(member("a", 0.30))),
     ])
-    ledger.save(to: path)
+    try ledger.save(to: path)
     #expect(PoolDayLedger.load(from: path) == ledger)
 }
 
@@ -254,6 +254,40 @@ private struct FixedPool: UsageProviderClient {
     #expect(day.memberCount == 1)
     #expect(near(day.logins["cc3/a@x.com"]?.last, 0.4))
     #expect(near(day.accountsBurned, 0))
+}
+
+private final class LogLines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+    var lines: [String] { lock.withLock { stored } }
+    func append(_ line: String) { lock.withLock { stored.append(line) } }
+}
+
+@Test func theCoordinatorLogsAFailedLedgerWriteOnceAndThenItsRecovery() async throws {
+    // A regular file where the ledger's directory should be makes every write fail.
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pool-day-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try Data().write(to: dir)
+    let path = dir.appendingPathComponent("pool-day.json").path
+    let config = Config(accounts: [AccountConfig(
+        id: "cc3", provider: .claude, displayName: "cc3", cliProxyURL: "http://127.0.0.1:1")])
+    let log = LogLines()
+    let coordinator = RefreshCoordinator(
+        store: SnapshotStore(initial: .empty), collector: UsageCollector(poolClient: FixedPool(week: 0.4)),
+        config: config, poolDayPath: path, log: { log.append($0) })
+    for _ in 0..<2 {
+        await coordinator.refresh(force: true)
+        await coordinator.waitForRefresh()
+    }
+    #expect(log.lines.count == 1)
+    #expect(log.lines.first?.contains("could not write \(path)") == true)
+
+    try FileManager.default.removeItem(at: dir)
+    await coordinator.refresh(force: true)
+    await coordinator.waitForRefresh()
+    #expect(PoolDayLedger.load(from: path)?.pools["cc3"] != nil)
+    #expect(log.lines.count == 2)
+    #expect(log.lines.last?.contains("wrote \(path) again") == true)
 }
 
 private actor SeedCalls {

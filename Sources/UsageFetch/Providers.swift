@@ -802,16 +802,20 @@ struct GrokClient: UsageProviderClient {
 
 // MARK: - Antigravity
 
-/// Credential: `<home>/.gemini/antigravity-cli/antigravity-oauth-token`.
-/// Note this is not `~/.gemini/oauth_creds.json`, which belongs to gemini-cli
-/// and goes stale independently.
+/// Credential: macOS login keychain (`service: "gemini"`, `account: "antigravity"`,
+/// stored by `agy` via `go-keyring`) for the default home, falling back to
+/// `<home>/.gemini/antigravity-cli/antigravity-oauth-token` (which is also used
+/// directly for custom `HOME` profiles). Note this is not `~/.gemini/oauth_creds.json`,
+/// which belongs to gemini-cli and goes stale independently.
 struct AntigravityClient: UsageProviderClient {
+    static let keychainService = "gemini"
+    static let keychainAccount = "antigravity"
+    static let tokenRelativePath = ".gemini/antigravity-cli/antigravity-oauth-token"
+    private static let goKeyringPrefix = "go-keyring-base64:"
+
     func fetch(_ account: AccountConfig) async throws -> ProviderReading {
         let home = (account.home ?? "~").expandedPath
-        let url = URL(fileURLWithPath: home)
-            .appendingPathComponent(".gemini/antigravity-cli/antigravity-oauth-token")
-        guard let data = try? Data(contentsOf: url),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard let root = Self.readTokenJSON(home: home),
               let refreshToken = root.dict("token")?.string("refresh_token"),
               !refreshToken.isEmpty
         else { throw FetchError.noCredential }
@@ -820,24 +824,33 @@ struct AntigravityClient: UsageProviderClient {
         // so refresh unconditionally rather than checking the expiry field.
         let accessToken = try await Self.refresh(refreshToken)
 
-        // This endpoint answers 403 PERMISSION_DENIED unless the User-Agent
-        // names the antigravity client. That is client sniffing, not a scope
-        // problem, so do not go looking for a missing OAuth scope.
+        // Antigravity CLI bills against daily-cloudcode-pa and version-gates
+        // the "Gemini Models" quota group on User-Agent (>= 2.x). Older or
+        // unversioned User-Agents only return "Claude and GPT models", and
+        // cloudcode-pa.googleapis.com reports 0% for daily-channel usage.
         var request = Http.get(
-            "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
             headers: [
                 "Authorization": "Bearer \(accessToken)",
                 "Content-Type": "application/json",
-                "User-Agent": "antigravity-cli",
+                "User-Agent": "antigravity/2.5.13 darwin/arm64",
             ])
         request.httpMethod = "POST"
         request.httpBody = Data("{}".utf8)
 
         let payload = try await Http.json(request)
+        let windows = try Self.parseWindows(from: payload)
+        return ProviderReading(
+            email: root.string("id_token_email"),
+            windows: windows)
+    }
+
+    /// Parses quota groups from `retrieveUserQuotaSummary` and orders windows
+    /// within each group from shortest to longest (`5h` before `7d`).
+    static func parseWindows(from payload: [String: Any]) throws -> [UsageWindow] {
         guard let groups = payload["groups"] as? [[String: Any]] else {
             throw FetchError.badPayload("no quota groups")
         }
-
         let windows: [UsageWindow] = groups.flatMap { group -> [UsageWindow] in
             let name = group.string("displayName") ?? "Models"
             let buckets = group["buckets"] as? [[String: Any]] ?? []
@@ -848,9 +861,67 @@ struct AntigravityClient: UsageProviderClient {
                     usedFraction: 1 - (bucket.double("remainingFraction") ?? 1),
                     resetsAt: bucket.string("resetTime").flatMap(Date.fromISO8601))
             }
+            .enumerated()
+            .sorted { lhs, rhs in
+                let lRank = windowOrder(lhs.element.label)
+                let rRank = windowOrder(rhs.element.label)
+                return lRank != rRank ? lRank < rRank : lhs.offset < rhs.offset
+            }
+            .map(\.element)
         }
         guard !windows.isEmpty else { throw FetchError.badPayload("no quota buckets") }
-        return ProviderReading(windows: windows)
+        return windows
+    }
+
+    private static func windowOrder(_ label: String) -> Int {
+        switch label {
+        case "5h": 0
+        case "24h": 1
+        case "7d": 2
+        case "30d": 3
+        default: 4
+        }
+    }
+
+    /// Reads the Antigravity OAuth token JSON.
+    ///
+    /// Newer versions of `agy` store the default profile's token in the macOS
+    /// login keychain and no longer keep the plaintext file on disk. Try the
+    /// keychain first for the default home, then fall back to the file. Custom
+    /// `HOME` profiles only read their own file so they do not alias the primary
+    /// keychain entry.
+    static func readTokenJSON(
+        home: String,
+        currentHome: String = NSHomeDirectory(),
+        readKeychain: () -> String? = {
+            Shell.keychainPassword(service: keychainService, account: keychainAccount)
+        }
+    ) -> [String: Any]? {
+        let normalizedHome = URL(fileURLWithPath: home).standardizedFileURL.path
+        let normalizedCurrent = URL(fileURLWithPath: currentHome).standardizedFileURL.path
+        if normalizedHome == normalizedCurrent,
+           let raw = readKeychain(),
+           let data = decodeKeychainPayload(raw),
+           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let refresh = root.dict("token")?.string("refresh_token"),
+           !refresh.isEmpty {
+            return root
+        }
+        let url = URL(fileURLWithPath: home).appendingPathComponent(tokenRelativePath)
+        guard let data = try? Data(contentsOf: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return root
+    }
+
+    /// Decodes a `go-keyring` keychain payload (`go-keyring-base64:<b64>`) or
+    /// plain UTF-8 JSON into raw JSON bytes.
+    static func decodeKeychainPayload(_ raw: String) -> Data? {
+        if raw.hasPrefix(goKeyringPrefix) {
+            let encoded = String(raw.dropFirst(goKeyringPrefix.count))
+            return Data(base64Encoded: encoded)
+        }
+        return Data(raw.utf8)
     }
 
     /// Exchanges the stored refresh token for an access token.

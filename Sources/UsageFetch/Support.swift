@@ -25,8 +25,11 @@ enum Shell {
     /// holds the ACL grant for the Claude Code items, so the read stays silent.
     /// A direct `SecItemCopyMatching` from this daemon is a different caller and
     /// makes macOS show an approval panel, which a background agent cannot answer.
-    static func keychainPassword(service: String) -> String? {
-        run("/usr/bin/security", ["find-generic-password", "-s", service, "-w"])
+    static func keychainPassword(service: String, account: String? = nil) -> String? {
+        var arguments = ["find-generic-password", "-s", service]
+        if let account { arguments += ["-a", account] }
+        arguments.append("-w")
+        return run("/usr/bin/security", arguments)
     }
 
     /// Runs a command and returns its trimmed output, or nil if it fails.

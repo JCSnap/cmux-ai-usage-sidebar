@@ -107,10 +107,26 @@ public enum Discovery {
 
     /// Antigravity has no config-directory variable. A second account needs a
     /// second `HOME`, so both the real home and any home-shaped child of it are
-    /// candidates.
-    static func antigravityHomes(home: String) -> [String] {
-        ([home] + childDirectories(of: home, prefix: "."))
-            .filter { FileManager.default.fileExists(atPath: "\($0)/\(antigravityTokenPath)") }
+    /// candidates. Newer `agy` builds keep the default profile's token in the
+    /// macOS login keychain instead of on disk.
+    static func antigravityHomes(
+        home: String,
+        currentHome: String = NSHomeDirectory(),
+        hasKeychainToken: () -> Bool = {
+            Shell.keychainPassword(
+                service: AntigravityClient.keychainService,
+                account: AntigravityClient.keychainAccount) != nil
+        }
+    ) -> [String] {
+        let normalizedHome = URL(fileURLWithPath: home).standardizedFileURL.path
+        let normalizedCurrent = URL(fileURLWithPath: currentHome).standardizedFileURL.path
+        return ([home] + childDirectories(of: home, prefix: "."))
+            .filter { candidate in
+                if FileManager.default.fileExists(atPath: "\(candidate)/\(antigravityTokenPath)") {
+                    return true
+                }
+                return candidate == home && normalizedHome == normalizedCurrent && hasKeychainToken()
+            }
     }
 
     static func antigravityAccounts(homes: [String], home: String) -> [AccountConfig] {

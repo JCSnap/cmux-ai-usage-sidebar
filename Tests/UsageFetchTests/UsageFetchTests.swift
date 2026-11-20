@@ -662,6 +662,69 @@ private final class GrokLockReplacementHook: @unchecked Sendable {
     #expect(!AntigravityClient.isWrongClient(503, "backend error"))
 }
 
+@Test func antigravityDecodesGoKeyringBase64AndPlainJson() throws {
+    let json = #"{"token":{"refresh_token":"rt-1"},"id_token_email":"u@example.com"}"#
+    let encoded = "go-keyring-base64:" + Data(json.utf8).base64EncodedString()
+
+    let decoded = try #require(AntigravityClient.decodeKeychainPayload(encoded))
+    #expect(String(decoding: decoded, as: UTF8.self) == json)
+
+    let plain = try #require(AntigravityClient.decodeKeychainPayload(json))
+    #expect(String(decoding: plain, as: UTF8.self) == json)
+
+    #expect(AntigravityClient.decodeKeychainPayload("go-keyring-base64:%%%invalid%%%") == nil)
+}
+
+@Test func antigravityReadsKeychainForDefaultHomeAndFileForCustomHome() throws {
+    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: tmp) }
+    let defaultHome = tmp.appendingPathComponent("home")
+    let customHome = tmp.appendingPathComponent("home-2")
+
+    let fileJSON = #"{"token":{"refresh_token":"from-file"},"id_token_email":"file@example.com"}"#
+    let kcJSON = #"{"token":{"refresh_token":"from-keychain"},"id_token_email":"kc@example.com"}"#
+    let kcPayload = "go-keyring-base64:" + Data(kcJSON.utf8).base64EncodedString()
+
+    for dir in [defaultHome, customHome] {
+        let tokenURL = dir.appendingPathComponent(AntigravityClient.tokenRelativePath)
+        try FileManager.default.createDirectory(
+            at: tokenURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(fileJSON.utf8).write(to: tokenURL)
+    }
+
+    // Default home prefers keychain over disk file.
+    let fromKC = AntigravityClient.readTokenJSON(
+        home: defaultHome.path, currentHome: defaultHome.path, readKeychain: { kcPayload })
+    #expect(fromKC?.dict("token")?.string("refresh_token") == "from-keychain")
+
+    // Default home falls back to disk file when keychain is absent.
+    let fallback = AntigravityClient.readTokenJSON(
+        home: defaultHome.path, currentHome: defaultHome.path, readKeychain: { nil })
+    #expect(fallback?.dict("token")?.string("refresh_token") == "from-file")
+
+    // Custom home never reads the global login keychain.
+    let custom = AntigravityClient.readTokenJSON(
+        home: customHome.path, currentHome: defaultHome.path, readKeychain: { kcPayload })
+    #expect(custom?.dict("token")?.string("refresh_token") == "from-file")
+}
+
+@Test func antigravityOrdersFiveHourBeforeWeeklyPerGroup() throws {
+    let payload: [String: Any] = [
+        "groups": [
+            [
+                "displayName": "Gemini Models",
+                "buckets": [
+                    ["window": "weekly", "remainingFraction": 0.96],
+                    ["window": "5h", "remainingFraction": 0.88],
+                ],
+            ],
+        ],
+    ]
+    let windows = try AntigravityClient.parseWindows(from: payload)
+    #expect(windows.map(\.label) == ["5h", "7d"])
+    #expect(windows.map(\.group) == ["Gemini Models", "Gemini Models"])
+}
+
 @Test func usedPercentClampsAndRounds() {
     #expect(UsageWindow(label: "5h", usedFraction: 0.094).usedPercent == 9)
     #expect(UsageWindow(label: "5h", usedFraction: 1.4).usedPercent == 100)
